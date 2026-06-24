@@ -125,12 +125,12 @@ export interface CryptoTransfer {
   amount_base_units: number;
   to_address: string;
   /** Populated after the Vault/Rail service reports final settlement. */
-  tx_hash?: string | null;
+  tx_hash: string | null;
   confirmations: number;
 }
 
 export interface Disbursement {
-  executed_by: DisbursementExecutor;
+  executed_by?: DisbursementExecutor;
   destination_account_id?: string | null;
   payout_destination?: PayoutDestination | null;
   crypto_transfer?: CryptoTransfer | null;
@@ -183,14 +183,24 @@ export type DisbursementFailureReason =
   | "account_not_found"
   | "other";
 
-export interface ConfirmDisbursementRequest {
-  status: DisbursementConfirmationStatus;
-  /** Required when status is `executed`. */
-  transfer_ref?: string;
-  executed_at?: IsoDateTime;
-  /** Required when status is `failed`. */
-  failure_reason?: DisbursementFailureReason;
-}
+/**
+ * Disbursement confirmation body — a discriminated union on `status`,
+ * mirroring the server's `oneOf`. `executed` requires `transfer_ref`;
+ * `failed` requires `failure_reason`. The compiler enforces the contract,
+ * so an `executed` body without a `transfer_ref` won't type-check.
+ */
+export type ConfirmDisbursementRequest =
+  | {
+      status: "executed";
+      /** Partner-ledger transfer reference. */
+      transfer_ref: string;
+      /** Optional partner-observed execution timestamp. */
+      executed_at?: IsoDateTime;
+    }
+  | {
+      status: "failed";
+      failure_reason: DisbursementFailureReason;
+    };
 
 // --- Collections ---------------------------------------------------------
 
@@ -198,7 +208,7 @@ export interface ListCollectionsDueParams {
   company_id?: string;
   user_id?: string;
   due_before?: IsoDate;
-  /** 1–500, default 100. */
+  /** 1–100, default 50. */
   limit?: number;
   cursor?: string;
 }

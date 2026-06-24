@@ -84,24 +84,23 @@ export class Advances {
   /**
    * Confirm (or fail) a partner-executed disbursement.
    * `POST /v1/advances/{id}/disbursement`.
+   *
+   * This endpoint is naturally idempotent by advance state — it takes no
+   * `Idempotency-Key`. The SDK does not auto-retry it: a transient failure
+   * after the server already applied the transition would otherwise surface
+   * as a `disbursement_confirmation_conflict` (409) on retry. Re-call it
+   * yourself if you need to, after checking the advance's current status.
    */
   async confirmDisbursement(
     advanceId: string,
     request: ConfirmDisbursementRequest,
-    options: { idempotencyKey?: string; signal?: AbortSignal } = {},
+    options: { signal?: AbortSignal } = {},
   ): Promise<Advance> {
-    const headers: Record<string, string> = {};
-    if (options.idempotencyKey !== undefined) {
-      headers[IDEMPOTENCY_KEY_HEADER] = resolveIdempotencyKey(
-        options.idempotencyKey,
-      );
-    }
     return this.transport.request<Advance>({
       method: "POST",
       path: `/v1/advances/${encodeURIComponent(advanceId)}/disbursement`,
       body: request,
-      headers,
-      retryable: options.idempotencyKey !== undefined,
+      retryable: false,
       signal: options.signal,
     });
   }

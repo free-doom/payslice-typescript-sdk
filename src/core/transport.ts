@@ -1,6 +1,7 @@
 import {
   PaysliceApiError,
   PaysliceConnectionError,
+  TimeoutError,
   errorFromResponse,
   type ApiErrorBody,
 } from "./errors.js";
@@ -113,7 +114,11 @@ export class Transport {
     }
 
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, this.timeoutMs);
     const onAbort = () => controller.abort();
     spec.signal?.addEventListener("abort", onAbort, { once: true });
 
@@ -126,6 +131,18 @@ export class Transport {
         signal: controller.signal,
       });
     } catch (cause) {
+      // Attribute the abort: our own timeout vs. the caller's signal.
+      if (timedOut) {
+        throw new TimeoutError(
+          `Request to ${spec.method} ${spec.path} timed out after ${this.timeoutMs}ms.`,
+        );
+      }
+      if (spec.signal?.aborted) {
+        throw new PaysliceConnectionError(
+          `Request to ${spec.method} ${spec.path} was aborted.`,
+          cause,
+        );
+      }
       throw new PaysliceConnectionError(
         `Request to ${spec.method} ${spec.path} failed: ${stringifyError(cause)}`,
         cause,

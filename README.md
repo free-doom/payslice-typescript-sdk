@@ -109,7 +109,7 @@ const event = await constructEvent({
   payload: rawBody,        // string or Buffer, exactly as received
   headers: req.headers,
   secret: process.env.PAYSLICE_WEBHOOK_SECRET!,
-  path: "/webhooks/payslice", // path of your REGISTERED endpoint URL
+  endpointUrl: "https://partner.example/webhooks/payslice", // your REGISTERED URL
 });
 
 switch (event.type) {
@@ -129,7 +129,9 @@ npm test
 npm run build
 ```
 
-`openapi.yaml` is vendored from the API repo. CI runs `generate:check` to fail on any drift between the spec and the generated types.
+`openapi.yaml` is vendored from the API repo. CI runs `generate:check` to fail on drift between the spec and the generated types, and `typecheck` runs a type-level conformance test (`test/conformance.test-d.ts`) asserting the public types stay interchangeable with the generated ones.
+
+> `baseUrl` must be the host **without** a `/v1` suffix (the SDK adds it). Use `https://sandbox-api.payslice.com`, not `.../v1`.
 
 ## License
 

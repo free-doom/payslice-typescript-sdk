@@ -2,7 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 import { Payslice } from "../src/client.js";
 import {
   InsufficientVaultBalanceError,
+  PaymentRequiredError,
   QuoteExpiredError,
+  ReleasesPausedError,
   ValidationError,
 } from "../src/core/errors.js";
 
@@ -146,6 +148,62 @@ describe("error mapping", () => {
       constructor: ValidationError,
       details: { field: "amount" },
     });
+  });
+
+  it("maps releases_paused (403) to ReleasesPausedError, not PermissionError", async () => {
+    const { fetchImpl } = mockFetch(() => ({
+      status: 403,
+      body: { code: "releases_paused", message: "paused" },
+    }));
+    await expect(
+      client(fetchImpl).advances.create({
+        quote_id: "qt_1",
+        user_id: "u_1",
+        amount: 5000,
+        currency: "USD",
+        due_date: "2026-07-01",
+      }),
+    ).rejects.toBeInstanceOf(ReleasesPausedError);
+  });
+
+  it("maps an unknown 402 code to the neutral PaymentRequiredError", async () => {
+    const { fetchImpl } = mockFetch(() => ({
+      status: 402,
+      body: { code: "some_future_402", message: "nope" },
+    }));
+    const err = await client(fetchImpl)
+      .quotes.get("qt_1")
+      .catch((e) => e);
+    expect(err).toBeInstanceOf(PaymentRequiredError);
+    expect(err).not.toBeInstanceOf(InsufficientVaultBalanceError);
+  });
+});
+
+describe("confirmDisbursement", () => {
+  it("does not auto-retry on a transient 503", async () => {
+    const { fetchImpl, calls } = mockFetch(() => ({
+      status: 503,
+      body: { code: "service_unavailable", message: "down" },
+    }));
+    await expect(
+      client(fetchImpl).advances.confirmDisbursement("adv_1", {
+        status: "executed",
+        transfer_ref: "tr_1",
+      }),
+    ).rejects.toMatchObject({ status: 503 });
+    expect(calls).toHaveLength(1);
+  });
+
+  it("sends no Idempotency-Key header", async () => {
+    const { fetchImpl, calls } = mockFetch(() => ({
+      status: 200,
+      body: { id: "adv_1", status: "released" },
+    }));
+    await client(fetchImpl).advances.confirmDisbursement("adv_1", {
+      status: "failed",
+      failure_reason: "account_closed",
+    });
+    expect(calls[0]!.headers["Idempotency-Key"]).toBeUndefined();
   });
 });
 

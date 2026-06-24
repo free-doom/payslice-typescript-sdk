@@ -91,6 +91,22 @@ describe("verifySignature", () => {
       verifySignature({ payload: body, headers, secret: SECRET, now: () => FIXED_NOW }),
     ).rejects.toBeInstanceOf(WebhookVerificationError);
   });
+
+  it("derives the signed path from endpointUrl", async () => {
+    const endpointUrl = "https://partner.example/webhooks/payslice";
+    const { body, headers } = signed(JSON.stringify({ type: "x" }), {
+      path: "/webhooks/payslice",
+    });
+    await expect(
+      verifySignature({
+        payload: body,
+        headers,
+        secret: SECRET,
+        endpointUrl,
+        now: () => FIXED_NOW,
+      }),
+    ).resolves.toBe(body);
+  });
 });
 
 describe("constructEvent", () => {

@@ -22,8 +22,9 @@ function validateIdempotencyKey(key: string): void {
       `idempotencyKey must be 1 to ${MAX_IDEMPOTENCY_KEY_BYTES} bytes (got ${byteLength}).`,
     );
   }
-  // Visible ASCII only, matching the server's parser.
-  if (!/^[\x21-\x7e]+$/.test(key)) {
-    throw new Error("idempotencyKey must contain only visible ASCII characters.");
+  // Printable ASCII (0x20–0x7E), matching what the server's header parser
+  // accepts. Space (0x20) is permitted.
+  if (!/^[\x20-\x7e]+$/.test(key)) {
+    throw new Error("idempotencyKey must contain only printable ASCII characters.");
   }
 }

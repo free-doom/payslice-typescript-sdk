@@ -18,7 +18,8 @@ export interface PaysliceOptions {
   /**
    * API base URL, e.g. `https://sandbox-api.payslice.com`. No default: the
    * environment must be chosen explicitly so a key is never sent to the
-   * wrong host.
+   * wrong host. Provide the host only — do NOT include a `/v1` suffix; the
+   * SDK appends the version path itself.
    */
   baseUrl: string;
   /** Custom `fetch` (defaults to the runtime global). */

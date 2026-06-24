@@ -6,20 +6,19 @@
  * instead and re-serialize, the bytes won't match what Payslice signed and
  * every verification will fail.
  *
- * `path` must be the path-and-query of the endpoint URL you REGISTERED with
- * Payslice — that is what the server signs over. Here the registered URL is
- * https://partner.example/webhooks/payslice, so the signed path is
- * "/webhooks/payslice".
+ * Pass the URL you REGISTERED with Payslice as `endpointUrl` — the SDK
+ * derives the signed path from it (the server signs over the registered
+ * URL's path). That avoids hand-copying a path string that could drift.
  */
 import express from "express";
 import { constructEvent, WebhookVerificationError } from "@payslice/sdk";
 
 const app = express();
 const WEBHOOK_SECRET = process.env.PAYSLICE_WEBHOOK_SECRET!;
-const SIGNED_PATH = "/webhooks/payslice";
+const ENDPOINT_URL = "https://partner.example/webhooks/payslice";
 
 app.post(
-  SIGNED_PATH,
+  "/webhooks/payslice",
   express.raw({ type: "application/json" }),
   async (req, res) => {
     try {
@@ -27,7 +26,7 @@ app.post(
         payload: req.body, // Buffer from express.raw — do not JSON-parse first
         headers: req.headers,
         secret: WEBHOOK_SECRET,
-        path: SIGNED_PATH,
+        endpointUrl: ENDPOINT_URL,
       });
 
       switch (event.type) {

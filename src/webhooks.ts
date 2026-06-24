@@ -126,10 +126,17 @@ export interface VerifyOptions {
   /** The endpoint secret returned when the webhook was registered. */
   secret: string;
   /**
-   * The path-and-query the signature was computed over. Defaults to `/`.
-   * Pass the path of your registered endpoint URL (use {@link pathAndQuery}
-   * on that URL) when it is not the root path, or when a proxy may rewrite
-   * the incoming request path.
+   * The full URL you registered with Payslice (e.g.
+   * `https://partner.example/webhooks/payslice`). The SDK derives the signed
+   * path-and-query from it. Prefer this over {@link path}: the server signs
+   * over the *registered* URL's path, so passing the URL removes the chance
+   * of a hand-copied path drifting out of sync.
+   */
+  endpointUrl?: string;
+  /**
+   * The exact path-and-query the signature was computed over. Advanced
+   * override; usually pass {@link endpointUrl} instead. Defaults to `/` only
+   * when neither is given (correct only for a root-path endpoint).
    */
   path?: string;
   /** Allowed clock skew, in seconds. Default 300. */
@@ -186,8 +193,11 @@ export async function verifySignature(opts: VerifyOptions): Promise<string> {
       ? opts.payload
       : new TextDecoder().decode(opts.payload);
 
+  const signedPath = opts.endpointUrl
+    ? pathAndQuery(opts.endpointUrl)
+    : (opts.path ?? "/");
   const bodyHash = await sha256Hex(opts.payload);
-  const canonical = `${timestamp}\nPOST\n${opts.path ?? "/"}\n${bodyHash}`;
+  const canonical = `${timestamp}\nPOST\n${signedPath}\n${bodyHash}`;
   const expected = await hmacSha256Hex(opts.secret, canonical);
   const provided = signature.startsWith(SIGNATURE_PREFIX)
     ? signature.slice(SIGNATURE_PREFIX.length)
