@@ -5,6 +5,7 @@ import {
   PaymentRequiredError,
   QuoteExpiredError,
   ReleasesPausedError,
+  TimeoutError,
   ValidationError,
 } from "../src/core/errors.js";
 
@@ -204,6 +205,31 @@ describe("confirmDisbursement", () => {
       failure_reason: "account_closed",
     });
     expect(calls[0]!.headers["Idempotency-Key"]).toBeUndefined();
+  });
+});
+
+describe("timeout", () => {
+  it("throws TimeoutError when a request exceeds timeoutMs", async () => {
+    // A fetch that never settles until its signal aborts.
+    const fetchImpl = ((_url: string, init: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init.signal?.addEventListener("abort", () => {
+          const err = new Error("aborted");
+          err.name = "AbortError";
+          reject(err);
+        });
+      })) as unknown as typeof fetch;
+
+    const payslice = new Payslice({
+      keyId: "key_123",
+      secret: "secret_abc",
+      baseUrl: "https://sandbox-api.payslice.com",
+      fetch: fetchImpl,
+      timeoutMs: 20,
+      maxRetries: 0,
+    });
+
+    await expect(payslice.vault.get()).rejects.toBeInstanceOf(TimeoutError);
   });
 });
 

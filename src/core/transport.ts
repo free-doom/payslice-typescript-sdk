@@ -78,6 +78,9 @@ export class Transport {
       try {
         return await this.attempt<T>(spec, pathAndQuery, bodyString);
       } catch (error) {
+        // A caller-initiated abort is final: surface the original error
+        // (which carries the cause) rather than retrying into a generic one.
+        if (spec.signal?.aborted) throw error;
         const canRetry =
           retryable &&
           attempt < this.maxRetries &&

@@ -107,6 +107,53 @@ describe("verifySignature", () => {
       }),
     ).resolves.toBe(body);
   });
+
+  it("includes the query string when deriving from endpointUrl", async () => {
+    const endpointUrl = "https://partner.example/webhooks/payslice?tenant=acme";
+    const { body, headers } = signed(JSON.stringify({ type: "x" }), {
+      path: "/webhooks/payslice?tenant=acme",
+    });
+    await expect(
+      verifySignature({
+        payload: body,
+        headers,
+        secret: SECRET,
+        endpointUrl,
+        now: () => FIXED_NOW,
+      }),
+    ).resolves.toBe(body);
+  });
+
+  it("rejects a mismatched endpointUrl", async () => {
+    const { body, headers } = signed(JSON.stringify({ type: "x" }), {
+      path: "/webhooks/payslice",
+    });
+    await expect(
+      verifySignature({
+        payload: body,
+        headers,
+        secret: SECRET,
+        endpointUrl: "https://partner.example/wrong/path",
+        now: () => FIXED_NOW,
+      }),
+    ).rejects.toBeInstanceOf(WebhookVerificationError);
+  });
+
+  it("lets endpointUrl take precedence over a conflicting path", async () => {
+    const { body, headers } = signed(JSON.stringify({ type: "x" }), {
+      path: "/webhooks/payslice",
+    });
+    await expect(
+      verifySignature({
+        payload: body,
+        headers,
+        secret: SECRET,
+        endpointUrl: "https://partner.example/webhooks/payslice",
+        path: "/some/other/path", // ignored in favor of endpointUrl
+        now: () => FIXED_NOW,
+      }),
+    ).resolves.toBe(body);
+  });
 });
 
 describe("constructEvent", () => {

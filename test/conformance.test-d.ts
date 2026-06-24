@@ -7,10 +7,20 @@
  * it. A drift in any shared schema (a renamed field, a wrong enum member, a
  * changed nullability) makes one of the assignments below fail to compile.
  *
- * Scope: the NAMED OpenAPI schemas only. Types the SDK invents around
- * inlined operation shapes (list-query params, `AdvancePage`,
- * `ConfirmDisbursementRequest`, the webhook event union) have no generated
- * counterpart and are covered by runtime tests instead.
+ * Scope: the named OpenAPI schemas the SDK exposes as a 1:1 wire type.
+ * Intentionally excluded:
+ *  - Schemas the SDK invents around inlined operation shapes (list-query
+ *    params, `AdvancePage`, `ConfirmDisbursementRequest`) — no generated
+ *    counterpart.
+ *  - `WebhookEnvelope` — the SDK deliberately models this as the
+ *    discriminated `WebhookEvent` union (concrete `data` per `type`), not a
+ *    structural mirror, so it is covered by runtime webhook tests instead.
+ *  - `Error` — the SDK's `ApiErrorBody` is intentionally not interchangeable:
+ *    its `details` is `Record<string, unknown> | null` (we normalize missing
+ *    to null), whereas the generated `details` is a non-null index signature.
+ *
+ * The discriminated-union section below also guards `ConfirmDisbursementRequest`
+ * against regressions with `@ts-expect-error` compile-failure assertions.
  */
 import type { components } from "../src/generated/types.js";
 import type {
@@ -20,6 +30,7 @@ import type {
   CollectionConfirmation,
   CollectionResult,
   CollectionsDue,
+  ConfirmDisbursementRequest,
   CryptoTransfer,
   Money,
   PayoutDestination,
@@ -55,3 +66,28 @@ bothWays<CollectionConfirmation, Schemas["CollectionConfirmation"]>(true);
 bothWays<CollectionResult, Schemas["CollectionResult"]>(true);
 bothWays<VaultResponse, Schemas["VaultResponse"]>(true);
 bothWays<Vault, Schemas["Vault"]>(true);
+
+// --- ConfirmDisbursementRequest discriminated-union guards ----------------
+// Valid bodies must compile; invalid ones must NOT. The `@ts-expect-error`
+// lines fail the build if the union ever loosens to accept them.
+
+const _executedOk: ConfirmDisbursementRequest = {
+  status: "executed",
+  transfer_ref: "tr_1",
+};
+const _failedOk: ConfirmDisbursementRequest = {
+  status: "failed",
+  failure_reason: "account_closed",
+};
+// @ts-expect-error executed body requires transfer_ref
+const _executedMissingRef: ConfirmDisbursementRequest = { status: "executed" };
+// @ts-expect-error failed body requires failure_reason
+const _failedMissingReason: ConfirmDisbursementRequest = { status: "failed" };
+// prettier-ignore
+// @ts-expect-error failed body must not carry transfer_ref
+const _failedWithRef: ConfirmDisbursementRequest = { status: "failed", failure_reason: "other", transfer_ref: "tr_1" };
+void _executedOk;
+void _failedOk;
+void _executedMissingRef;
+void _failedMissingReason;
+void _failedWithRef;
