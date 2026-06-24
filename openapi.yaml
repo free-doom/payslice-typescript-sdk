@@ -1,0 +1,1468 @@
+openapi: 3.1.0
+info:
+  title: Payslice EWA Partner API
+  version: 0.1.0
+  description: |
+    Partner-facing API for payroll platforms and neobanks to offer
+    earned wage advances to their users, funded by Payslice capital.
+    In partner-ledger mode, Payslice prefunds a Payslice-owned vault
+    account on the partner's ledger. In Payslice-executed crypto mode,
+    this service authorizes an external Payslice Vault/Rail service to
+    settle directly to the user's wallet while Postgres remains the
+    advance accounting source of truth.
+
+    ## Roles & money model
+    Payslice is the capital provider, underwriter, and system of record
+    for advances. The partner — a payroll platform or neobank — is the
+    distribution channel and collection agent at payroll. For partners
+    whose users hold accounts on the partner ledger, the partner is
+    also the execution rail: Payslice prefunds a vault account it owns
+    ON the partner's ledger, and advances are instant internal moves
+    on that ledger. For configured crypto partners, the partner supplies
+    the wallet destination and Payslice coordinates with the external
+    Vault/Rail service that executes the on-chain payout.
+
+    The partner earns a configured share of each advance fee
+    (`partner_fee_share` on quotes and advances). It accrues when the
+    fee is collected at payroll — never on written-off advances — and
+    is paid out monthly via an internal transfer from Payslice's vault
+    to the partner's own account. The accrued balance is visible on
+    `GET /vault`.
+
+    ## Flow
+    0. Partner-ledger mode: Payslice tops up its vault on the partner's
+       ledger (prefunds arrive over external rails, up to 3 business
+       days). Crypto mode: the external Vault/Rail service manages
+       Payslice treasury and payout reservations.
+    1. Partner requests a quote for an employee (`POST /quotes`).
+    2. Partner requests release (`POST /advances`). In
+       `executed_by: partner`, Payslice approves and authorizes the
+       internal transfer (Payslice vault → employee account); the
+       partner executes and confirms it
+       (`POST /advances/{advanceId}/disbursement`). In
+       `executed_by: payslice`, Payslice records Vault/Rail reservation
+       and payout refs, then releases the advance after the Vault/Rail
+       service reports final settlement evidence.
+       The `advance.approved` webhook reflects the same mode-specific
+       instruction.
+    3. Repayment happens through payroll deduction: Payslice tells the
+       partner what is due (`GET /collections/due` + `collection.due`
+       webhook); at payroll the partner deducts amount + fee, credits
+       Payslice's vault on its own ledger, and confirms
+       (`POST /collections`).
+    4. Treasury: `GET /vault` mirrors Payslice's vault balance at the
+       partner for partner-ledger mode. Sweeping surplus back happens
+       in the other direction — Payslice calls the **partner's**
+       withdraw endpoint (see below), so there is no withdrawal
+       endpoint in this API.
+
+    ## Partner-implemented endpoints (not in this spec)
+    During onboarding the partner exposes a small counterpart API that
+    Payslice calls:
+    - **Withdraw**: debit Payslice's vault on the partner's ledger and
+      send the funds to Payslice's bank account or crypto wallet over
+      external rails. Used to sweep surplus (accumulated collections)
+      back to Payslice treasury for partner-ledger mode.
+
+    Its exact shape is agreed per partner during onboarding; Payslice
+    adapts to the partner's existing conventions.
+
+    ## Authentication
+    Requests are authenticated with a key pair: a public key ID and a
+    secret. The secret is never transmitted — it signs each request.
+
+    Required headers:
+    - `X-Payslice-Key-Id`: the partner's public key ID (safe to log).
+    - `X-Payslice-Timestamp`: Unix seconds. Requests outside a ±300s
+      window are rejected (replay protection).
+    - `X-Payslice-Signature`: `v1=<hex>` where the digest is
+      `HMAC-SHA256(secret, timestamp + "\n" + METHOD + "\n" + path +
+      "\n" + SHA256(body))`. `path` is the absolute path exactly as
+      sent on the wire, **including the query string** when present
+      (e.g. `/v1/collections/due?company_id=co-1129`) — no
+      re-encoding or parameter reordering. `SHA256(body)` is the
+      lowercase hex digest of the raw request body bytes; for
+      requests without a body, use the SHA256 of the empty string
+      (`e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`).
+
+    Because the body is covered by the signature, requests are
+    tamper-evident in transit. Multiple secrets can be active per key
+    ID to allow zero-downtime rotation. Outbound webhooks use the same
+    HMAC-SHA256 scheme with a separate per-endpoint secret, so partners
+    implement one signing utility for both directions.
+
+    ## Multi-tenancy
+    Each partner (payroll platform or neobank) is a tenant. Tenancy is
+    derived from the API key — there is no tenant field in any payload,
+    and every resource (quotes, advances, collections, vault)
+    is implicitly scoped to the authenticated partner. A partner can
+    never reference another partner's resources. Webhook endpoints,
+    signing secrets, fee schedules, caps, exposure limits, and
+    disbursement mode are configured per partner.
+
+    ## Versioning & compatibility
+    The major version lives in the URL (`/v1`) and changes only on
+    breaking changes.
+
+    Non-breaking (may ship within a major version, no notice):
+    - New endpoints and new webhook event types.
+    - New optional request fields and new response fields.
+    - New values in reason-code enums (`decline_reasons`,
+      `failure_reason`, error `code`s).
+
+    Clients must be tolerant readers: ignore unknown response fields
+    and unknown webhook event types.
+
+    Frozen within a major version (changing these means a new major):
+    - Status enums (`AdvanceStatus`, quote status) — partners build
+      state machines on these.
+    - Existing field types, semantics, and required-ness.
+    - The request-signing scheme.
+
+    Webhook payloads follow the API version configured for the
+    partner's endpoint, and every envelope carries `api_version`.
+
+    Deprecation: a major version remains supported for at least 12
+    months after its successor ships, announced via `Deprecation` and
+    `Sunset` response headers and direct partner communication.
+
+    ## Conventions
+    - All monetary amounts are integers in minor units (cents).
+    - Currencies are ISO 4217 codes.
+    - User and company IDs are the partner's own external identifiers,
+      namespaced per partner. No pre-registration of users is required.
+      The same employer or employee appearing under two partners is two
+      independent records.
+    - `POST /advances` and `POST /collections` require an
+      `Idempotency-Key` header. Retries with the same key return the
+      original result and never authorize or report money movement
+      twice. Keys are scoped per partner, not globally.
+    - Outbound webhooks are signed with HMAC-SHA256 in the
+      `X-Payslice-Signature` header and carry a unique `event_id` for
+      consumer-side deduplication. Failed deliveries are retried with
+      exponential backoff.
+
+servers:
+  - url: https://api.payslice.com/v1
+
+security:
+  - keyId: []
+    requestSignature: []
+    requestTimestamp: []
+
+paths:
+  /quotes:
+    post:
+      operationId: createQuote
+      summary: Request an advance quote for an employee
+      description: |
+        Runs eligibility and pricing for an employee. Quotes are
+        single-use and expire 4 hours after creation. A declined quote
+        is returned with `approved: false` and machine-readable
+        `decline_reasons` rather than an error.
+
+        An `Idempotency-Key` is optional here (quoting moves no money)
+        but honored: a retry with the same key returns the original
+        quote instead of creating a new one.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: |
+            Optional unique key. Retries with the same key replay the
+            original response; reusing a key with a different payload
+            is rejected with `409`.
+          schema:
+            type: string
+            maxLength: 255
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/QuoteRequest'
+      responses:
+        '201':
+          description: Quote created (approved or declined).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Quote'
+              examples:
+                approved:
+                  summary: Approved quote
+                  value:
+                    id: qt_8c4e2a91
+                    user_id: usr-4821
+                    company_id: co-1129
+                    approved: true
+                    status: approved
+                    amount: 15000
+                    currency: USD
+                    fee: 300
+                    partner_fee_share: 90
+                    created_at: '2026-06-11T14:02:11Z'
+                    expires_at: '2026-06-11T18:02:11Z'
+                declined:
+                  summary: Declined quote
+                  value:
+                    id: qt_5d12f7b3
+                    user_id: usr-7733
+                    company_id: co-1129
+                    approved: false
+                    status: declined
+                    amount: null
+                    currency: null
+                    fee: null
+                    partner_fee_share: null
+                    decline_reasons:
+                      - tenure_too_short
+                    created_at: '2026-06-11T14:05:42Z'
+                    expires_at: '2026-06-11T18:05:42Z'
+        '403':
+          description: |
+            Quote creation is paused for this partner (`code`:
+            `forbidden`) because the partner is suspended or offboarded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: |
+            Idempotency-Key already used with a different request
+            payload (`code`: `idempotency_key_conflict`). Retry with a
+            fresh key.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /quotes/{quoteId}:
+    get:
+      operationId: getQuote
+      summary: Retrieve a quote
+      parameters:
+        - $ref: '#/components/parameters/quoteId'
+      responses:
+        '200':
+          description: The quote.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Quote'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /advances:
+    post:
+      operationId: createAdvance
+      summary: Request release of an advance against an approved quote
+      description: |
+        Requests release of funds against an approved, unexpired,
+        unused quote.
+
+        Validations:
+        - `quote_id` must reference an approved quote that has not
+          expired and has not already been drawn.
+        - `amount` must be less than or equal to the quoted amount
+          (partial drawdown is allowed).
+        - `currency` must exactly match the quote currency.
+        - Funding must be available: partner-ledger mode reserves
+          Payslice's vault on the partner ledger; Payslice crypto mode
+          requires the external Vault/Rail service to accept the payout
+          reservation.
+
+        On success the advance is returned with status `approved`: an
+        authorization has been created. In `executed_by: partner` mode,
+        the partner executes the internal transfer from Payslice's
+        vault to the employee's account and confirms via
+        `POST /advances/{advanceId}/disbursement`. In
+        `executed_by: payslice` crypto mode, Payslice records external
+        Vault/Rail reservation and payout references and releases the
+        advance only after the Vault/Rail service reports final
+        settlement evidence; the partner must not execute a separate
+        funds movement.
+      parameters:
+        - $ref: '#/components/parameters/idempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdvanceRequest'
+      responses:
+        '201':
+          description: Advance approved — partner execution or Payslice payout is pending.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Advance'
+              example:
+                id: adv_3f9d1c70
+                quote_id: qt_8c4e2a91
+                user_id: usr-4821
+                company_id: co-1129
+                amount: 12000
+                currency: USD
+                fee: 300
+                partner_fee_share: 90
+                amount_outstanding: 12300
+                status: approved
+                due_date: '2026-06-30'
+                authorization_expires_at: '2026-06-12T14:06:03Z'
+                disbursement:
+                  executed_by: partner
+                  destination_account_id: acct-9911
+                  payout_destination: null
+                  crypto_transfer: null
+                  transfer_ref: null
+                created_at: '2026-06-11T14:06:03Z'
+                released_at: null
+        '402':
+          description: |
+            Payslice cannot fund the advance right now. `code`
+            distinguishes why: `insufficient_vault_balance` (the vault
+            on the partner's ledger is exhausted),
+            `exposure_limit_reached` (releasing would exceed the
+            per-partner exposure limit; clears as collections land and
+            exposure falls), or `user_advance_cap_reached` (the user's
+            open advances already reach their per-user cap; clears as
+            their advances are repaid). The same per-user cap is also
+            surfaced at quote time as the `user_advance_cap_reached`
+            decline reason.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: |
+            Advance releases are paused for this partner (`code`:
+            `releases_paused`) — e.g. an unresolved daily
+            reconciliation discrepancy. Releases resume once it is
+            resolved; contact Payslice if unexpected.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Quote already used, or idempotency key conflict.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '410':
+          description: Quote expired.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+    get:
+      operationId: listAdvances
+      summary: List advances
+      parameters:
+        - $ref: '#/components/parameters/companyIdFilter'
+        - $ref: '#/components/parameters/userIdFilter'
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/AdvanceStatus'
+        - $ref: '#/components/parameters/cursor'
+        - $ref: '#/components/parameters/advanceLimit'
+      responses:
+        '200':
+          description: Paginated list of advances.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Advance'
+                  next_cursor:
+                    type: [string, 'null']
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /advances/{advanceId}:
+    get:
+      operationId: getAdvance
+      summary: Retrieve an advance
+      parameters:
+        - $ref: '#/components/parameters/advanceId'
+      responses:
+        '200':
+          description: The advance.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Advance'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /advances/{advanceId}/disbursement:
+    post:
+      operationId: confirmDisbursement
+      summary: Confirm execution of an approved advance
+      description: |
+        Partner-ledger mode only. The partner reports the result of
+        executing the internal transfer (Payslice vault → employee
+        account) on its ledger. `executed` transitions the advance from
+        `approved` to `released`; `failed` transitions it to `failed`
+        and releases the vault authorization hold. Naturally idempotent
+        — repeat reports for the same advance return the current state.
+
+        Advances with `executed_by: payslice` are settled through the
+        external Vault/Rail service and cannot be released through this
+        endpoint.
+      parameters:
+        - $ref: '#/components/parameters/advanceId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - type: object
+                  additionalProperties: false
+                  required: [status, transfer_ref]
+                  properties:
+                    status:
+                      type: string
+                      enum: [executed]
+                    transfer_ref:
+                      type: string
+                      description: Partner-ledger transfer reference.
+                    executed_at:
+                      type: string
+                      format: date-time
+                      description: |
+                        Optional partner-observed execution timestamp. Stored
+                        as informational metadata; Payslice stamps canonical
+                        release and ledger confirmation time server-side.
+                - type: object
+                  additionalProperties: false
+                  required: [status, failure_reason]
+                  properties:
+                    status:
+                      type: string
+                      enum: [failed]
+                    failure_reason:
+                      type: string
+                      enum: [account_closed, account_frozen, account_not_found, other]
+                      description: Machine-readable reason.
+            examples:
+              executed:
+                summary: Transfer succeeded
+                value:
+                  status: executed
+                  transfer_ref: tr-88421-aa
+                  executed_at: '2026-06-11T14:09:27Z'
+              failed:
+                summary: Transfer failed
+                value:
+                  status: failed
+                  failure_reason: account_not_found
+      responses:
+        '200':
+          description: Advance updated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Advance'
+              examples:
+                executed:
+                  summary: Released advance
+                  value:
+                    id: adv_3f9d1c70
+                    quote_id: qt_8c4e2a91
+                    user_id: usr-4821
+                    company_id: co-1129
+                    amount: 12000
+                    currency: USD
+                    fee: 300
+                    partner_fee_share: 90
+                    amount_outstanding: 12300
+                    status: released
+                    due_date: '2026-06-30'
+                    authorization_expires_at: null
+                    disbursement:
+                      executed_by: partner
+                      destination_account_id: acct-9911
+                      payout_destination: null
+                      crypto_transfer: null
+                      transfer_ref: tr-88421-aa
+                      failure_reason: null
+                    created_at: '2026-06-11T14:06:03Z'
+                    released_at: '2026-06-11T14:09:27Z'
+                failed:
+                  summary: Failed advance
+                  value:
+                    id: adv_7c2e9b14
+                    quote_id: qt_2b88d014
+                    user_id: usr-2287
+                    company_id: co-1129
+                    amount: 5000
+                    currency: USD
+                    fee: 120
+                    partner_fee_share: 36
+                    amount_outstanding: 0
+                    status: failed
+                    due_date: '2026-06-30'
+                    authorization_expires_at: null
+                    disbursement:
+                      executed_by: partner
+                      destination_account_id: acct-3307
+                      payout_destination: null
+                      crypto_transfer: null
+                      transfer_ref: null
+                      failure_reason: account_not_found
+                    created_at: '2026-06-11T15:30:02Z'
+                    released_at: null
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: |
+            Advance is not awaiting partner execution (authorization
+            expired, canceled, Payslice-executed, or already confirmed
+            with a different result).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /collections/due:
+    get:
+      operationId: listCollectionsDue
+      summary: List outstanding amounts due for payroll deduction
+      description: |
+        Returns the outstanding advances to be deducted from payroll,
+        filterable by company and/or user, with aggregate totals per
+        currency — so at payroll time the partner knows exactly how
+        much each company's users owe.
+      parameters:
+        - $ref: '#/components/parameters/companyIdFilter'
+        - $ref: '#/components/parameters/userIdFilter'
+        - name: due_before
+          in: query
+          description: Only include items due on or before this date.
+          schema:
+            type: string
+            format: date
+        - $ref: '#/components/parameters/cursor'
+        - $ref: '#/components/parameters/limit'
+      responses:
+        '200':
+          description: Items due plus per-currency totals.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CollectionsDue'
+
+  /collections:
+    post:
+      operationId: confirmCollections
+      summary: Confirm payroll deductions
+      description: |
+        The partner reports what was actually deducted in a payroll
+        run, including partial and failed deductions (employee
+        terminated, insufficient net pay, etc.). Collected amounts are
+        credited to Payslice's vault on the partner's ledger in the
+        same payroll run — `ledger_credit_ref` references that credit
+        (each credit ref can only ever be reported once). Payslice
+        reconciles the ledger and updates advance statuses accordingly.
+
+        Confirmations are **additive and immutable**: to report late or
+        missed items for a pay date that was already confirmed, submit
+        another confirmation for the same `pay_date` with just those
+        items. Cumulative collections per advance can never exceed
+        amount + fee. Requires an `Idempotency-Key` so retries never
+        double-report. Invalid or conflicting items reject the whole
+        batch; successful batches return one accepted result per stored
+        item.
+      parameters:
+        - $ref: '#/components/parameters/idempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CollectionConfirmation'
+      responses:
+        '200':
+          description: Confirmation processed; updated advances returned.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/CollectionResult'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '409':
+          description: Idempotency key conflict, duplicate ledger credit reference, or non-collectible advance.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /vault:
+    get:
+      operationId: getVault
+      summary: Retrieve Payslice's vault balance on the partner's ledger
+      description: |
+        Payslice's view (mirror) of its vault account held on the
+        partner's ledger, for transparency and reconciliation. Sweeping
+        funds out is Payslice-initiated via the partner's own withdraw
+        endpoint and is not part of this API.
+      responses:
+        '200':
+          description: Current vault state.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VaultResponse'
+
+webhooks:
+  advance.approved:
+    post:
+      summary: Advance authorized
+      description: |
+        Fired when an advance is approved. Carries the same mode as the
+        `POST /advances` response. For `executed_by: partner`, move
+        `amount` from Payslice's vault to the employee's account on the
+        partner ledger, then confirm via
+        `POST /advances/{advanceId}/disbursement` before
+        `authorization_expires_at`. For `executed_by: payslice`,
+        Payslice is processing payout through the external Vault/Rail
+        service and the partner must not execute separate funds
+        movement.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/WebhookEnvelope'
+                - type: object
+                  properties:
+                    data:
+                      $ref: '#/components/schemas/Advance'
+            example:
+              event_id: evt_9f2d8a4c01
+              type: advance.approved
+              api_version: v1
+              created_at: '2026-06-11T14:06:03Z'
+              data:
+                id: adv_3f9d1c70
+                quote_id: qt_8c4e2a91
+                user_id: usr-4821
+                company_id: co-1129
+                amount: 12000
+                currency: USD
+                fee: 300
+                partner_fee_share: 90
+                amount_outstanding: 12300
+                status: approved
+                due_date: '2026-06-30'
+                authorization_expires_at: null
+                disbursement:
+                  executed_by: payslice
+                  destination_account_id: null
+                  payout_destination:
+                    type: crypto_wallet
+                    chain: evm
+                    network: configured-network-id
+                    address: '0x1111111111111111111111111111111111111111'
+                  crypto_transfer: null
+                  transfer_ref: null
+                created_at: '2026-06-11T14:06:03Z'
+                released_at: null
+      responses:
+        '200':
+          description: Acknowledged.
+
+  advance.released:
+    post:
+      summary: Disbursement to the employee confirmed
+      description: |
+        Fired when the employee payout is final. Partner-ledger
+        releases carry the partner transfer reference. Payslice crypto
+        releases carry the token, network, destination, base-unit
+        amount, confirmations, and transaction hash reported by the
+        Vault/Rail service; the tx hash is also exposed as
+        `transfer_ref`.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/WebhookEnvelope'
+                - type: object
+                  properties:
+                    data:
+                      $ref: '#/components/schemas/Advance'
+            example:
+              event_id: evt_b7e1c3f592
+              type: advance.released
+              api_version: v1
+              created_at: '2026-06-11T14:09:27Z'
+              data:
+                id: adv_3f9d1c70
+                quote_id: qt_8c4e2a91
+                user_id: usr-4821
+                company_id: co-1129
+                amount: 12000
+                currency: USD
+                fee: 300
+                partner_fee_share: 90
+                amount_outstanding: 12300
+                status: released
+                due_date: '2026-06-30'
+                authorization_expires_at: null
+                disbursement:
+                  executed_by: payslice
+                  destination_account_id: null
+                  payout_destination:
+                    type: crypto_wallet
+                    chain: evm
+                    network: configured-network-id
+                    address: '0x1111111111111111111111111111111111111111'
+                  crypto_transfer:
+                    chain: evm
+                    network: configured-network-id
+                    asset: USDC
+                    token_contract: '0x2222222222222222222222222222222222222222'
+                    token_decimals: 6
+                    amount_base_units: 120000000
+                    to_address: '0x1111111111111111111111111111111111111111'
+                    tx_hash: '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+                    confirmations: 2
+                  transfer_ref: '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+                created_at: '2026-06-11T14:06:03Z'
+                released_at: '2026-06-11T14:09:27Z'
+      responses:
+        '200':
+          description: Acknowledged.
+
+  advance.failed:
+    post:
+      summary: Disbursement to the employee failed
+      requestBody:
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/WebhookEnvelope'
+                - type: object
+                  properties:
+                    data:
+                      $ref: '#/components/schemas/Advance'
+            example:
+              event_id: evt_4a8d2e7b16
+              type: advance.failed
+              api_version: v1
+              created_at: '2026-06-11T15:31:48Z'
+              data:
+                id: adv_7c2e9b14
+                quote_id: qt_2b88d014
+                user_id: usr-2287
+                company_id: co-1129
+                amount: 5000
+                currency: USD
+                fee: 120
+                partner_fee_share: 36
+                amount_outstanding: 0
+                status: failed
+                due_date: '2026-06-30'
+                authorization_expires_at: null
+                disbursement:
+                  executed_by: partner
+                  destination_account_id: acct-3307
+                  payout_destination: null
+                  crypto_transfer: null
+                  transfer_ref: null
+                  failure_reason: account_closed
+                created_at: '2026-06-11T15:30:02Z'
+                released_at: null
+      responses:
+        '200':
+          description: Acknowledged.
+
+  collection.due:
+    post:
+      summary: Daily digest of amounts due for payroll deduction
+      description: |
+        Sent daily per company with the same payload shape as
+        `GET /collections/due` filtered to that company.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/WebhookEnvelope'
+                - type: object
+                  properties:
+                    data:
+                      $ref: '#/components/schemas/CollectionsDue'
+            example:
+              event_id: evt_c5f09d3a48
+              type: collection.due
+              api_version: v1
+              created_at: '2026-06-29T06:00:00Z'
+              data:
+                items:
+                  - advance_id: adv_3f9d1c70
+                    user_id: usr-4821
+                    company_id: co-1129
+                    amount: 12300
+                    currency: USD
+                    due_date: '2026-06-30'
+                  - advance_id: adv_91b2e4d5
+                    user_id: usr-5106
+                    company_id: co-1129
+                    amount: 8160
+                    currency: USD
+                    due_date: '2026-06-30'
+                totals:
+                  - amount: 20460
+                    currency: USD
+                next_cursor: null
+      responses:
+        '200':
+          description: Acknowledged.
+
+  vault.low_balance:
+    post:
+      summary: Payslice's vault on the partner's ledger is running low
+      description: |
+        Payslice has initiated a top-up; if the vault is exhausted
+        before the prefund lands, new advance requests will return 402.
+        Informational for the partner — no action required.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/WebhookEnvelope'
+                - type: object
+                  properties:
+                    data:
+                      type: object
+                      properties:
+                        balance:
+                          $ref: '#/components/schemas/Money'
+                        threshold:
+                          $ref: '#/components/schemas/Money'
+            example:
+              event_id: evt_e2b64f8c73
+              type: vault.low_balance
+              api_version: v1
+              created_at: '2026-06-27T09:14:55Z'
+              data:
+                balance:
+                  amount: 180000
+                  currency: USD
+                threshold:
+                  amount: 250000
+                  currency: USD
+      responses:
+        '200':
+          description: Acknowledged.
+
+components:
+  securitySchemes:
+    keyId:
+      type: apiKey
+      in: header
+      name: X-Payslice-Key-Id
+      description: Partner's public key ID. Identifies the tenant; safe to log.
+    requestTimestamp:
+      type: apiKey
+      in: header
+      name: X-Payslice-Timestamp
+      description: Unix seconds; must be within ±300s of server time.
+    requestSignature:
+      type: apiKey
+      in: header
+      name: X-Payslice-Signature
+      description: |
+        `v1=<hex>` HMAC-SHA256 over
+        `timestamp + "\n" + METHOD + "\n" + path + "\n" + SHA256(body)`
+        using the partner's secret. The secret itself is never sent.
+        `path` includes the query string exactly as sent;
+        `SHA256(body)` is the lowercase hex digest of the raw body
+        bytes (the hash of the empty string for bodyless requests).
+
+  parameters:
+    idempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: |
+        Unique key per logical operation. Retries with the same key
+        return the original result without moving money again.
+        Validation and funding errors are also replayed for the same
+        key; after changing request details or adding vault funds, use
+        a fresh key for the new attempt.
+      schema:
+        type: string
+        maxLength: 255
+    quoteId:
+      name: quoteId
+      in: path
+      required: true
+      schema:
+        type: string
+    advanceId:
+      name: advanceId
+      in: path
+      required: true
+      schema:
+        type: string
+    companyIdFilter:
+      name: company_id
+      in: query
+      schema:
+        type: string
+    userIdFilter:
+      name: user_id
+      in: query
+      schema:
+        type: string
+    cursor:
+      name: cursor
+      in: query
+      schema:
+        type: string
+    limit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 50
+    advanceLimit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 25
+
+  responses:
+    NotFound:
+      description: Resource not found.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    ValidationError:
+      description: Request failed validation.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+  schemas:
+    Money:
+      type: object
+      required: [amount, currency]
+      properties:
+        amount:
+          type: integer
+          description: Amount in minor units (cents).
+        currency:
+          type: string
+          description: ISO 4217 currency code.
+          examples: [USD, EUR]
+
+    QuoteRequest:
+      type: object
+      required: [user_id, company_id, contract, salary]
+      properties:
+        user_id:
+          type: string
+          description: Partner's external ID for the employee.
+        company_id:
+          type: string
+          description: Partner's external ID for the employer.
+        contract:
+          type: object
+          required: [id, start_date]
+          properties:
+            id:
+              type: string
+            start_date:
+              type: string
+              format: date
+            end_date:
+              type: [string, 'null']
+              format: date
+              description: Null for indefinite contracts.
+        salary:
+          type: object
+          required: [amount, currency, frequency]
+          properties:
+            amount:
+              type: integer
+              description: Gross salary per pay period, in minor units.
+            currency:
+              type: string
+            frequency:
+              type: string
+              enum: [monthly, weekly]
+        settlements:
+          type: array
+          maxItems: 3
+          description: Up to the last 3 salary settlements, most recent first.
+          items:
+            type: object
+            required: [amount, currency, date]
+            properties:
+              amount:
+                type: integer
+              currency:
+                type: string
+              date:
+                type: string
+                format: date
+
+    Quote:
+      type: object
+      required: [id, approved, status, user_id, company_id, created_at, expires_at]
+      properties:
+        id:
+          type: string
+        user_id:
+          type: string
+        company_id:
+          type: string
+        approved:
+          type: boolean
+        status:
+          type: string
+          enum: [approved, declined, expired, used]
+        amount:
+          type: [integer, 'null']
+          description: Maximum advance amount in minor units. Null when declined.
+        currency:
+          type: [string, 'null']
+        fee:
+          type: [integer, 'null']
+          description: Fee in minor units, charged on top of the advance.
+        partner_fee_share:
+          type: [integer, 'null']
+          description: |
+            The partner's share of `fee`, in minor units (per-partner
+            config). Accrues when the fee is collected; paid out
+            monthly.
+        decline_reasons:
+          type: array
+          items:
+            type: string
+            enum:
+              - tenure_too_short
+              - final_contract_month
+              - insufficient_settlement_history
+              - cap_exceeded
+              - user_advance_cap_reached
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+          description: 4 hours after creation. Quotes are single-use.
+
+    AdvanceRequest:
+      type: object
+      additionalProperties: false
+      required: [quote_id, user_id, amount, currency, due_date]
+      properties:
+        quote_id:
+          type: string
+        user_id:
+          type: string
+        amount:
+          type: integer
+          description: Must be <= the quoted amount (partial drawdown allowed).
+        currency:
+          type: string
+          description: Must exactly match the quote currency.
+        destination_account_id:
+          type: [string, 'null']
+          description: |
+            The employee's account reference on the partner's ledger
+            (`executed_by: partner`). Opaque to Payslice. Required for
+            partner-ledger mode and omitted for Payslice crypto mode.
+        payout_destination:
+          anyOf:
+            - $ref: '#/components/schemas/PayoutDestination'
+            - type: 'null'
+          description: |
+            Required for `executed_by: payslice` crypto partners.
+        due_date:
+          type: string
+          format: date
+          description: The payroll date on which the deduction is expected.
+    AdvanceStatus:
+      type: string
+      enum: [approved, released, canceled, failed, repaid, partially_repaid, written_off]
+      description: |
+        `approved`: authorized; partner execution or external Vault/Rail payout is pending.
+        `released`: transfer to the employee was confirmed.
+        `canceled`: authorization expired unexecuted.
+        `failed`: partner reported the transfer could not be executed, or the external Vault/Rail payout failed before settlement.
+        `repaid`: amount + fee fully collected via payroll deduction.
+        `partially_repaid`: partly collected; the remainder stays due
+        and rolls into subsequent payroll cycles.
+        `written_off`: Payslice wrote off the uncollected remainder
+        after collection attempts were exhausted.
+
+    Advance:
+      type: object
+      required: [id, quote_id, user_id, company_id, amount, currency, fee, status, due_date, created_at]
+      properties:
+        id:
+          type: string
+        quote_id:
+          type: string
+        user_id:
+          type: string
+        company_id:
+          type: string
+        amount:
+          type: integer
+        currency:
+          type: string
+        fee:
+          type: integer
+        partner_fee_share:
+          type: integer
+          description: |
+            The partner's share of `fee`, in minor units. Accrues when
+            the fee is collected at payroll (never on written-off
+            advances); paid out monthly.
+        amount_outstanding:
+          type: integer
+          description: |
+            Amount + fee still owed, in minor units. Equals
+            `amount + fee − total collected` once the advance has been
+            disbursed (`released` onward); the prospective
+            `amount + fee` while `approved`; `0` for advances that
+            never disbursed (`canceled`, `failed`).
+        status:
+          $ref: '#/components/schemas/AdvanceStatus'
+        due_date:
+          type: string
+          format: date
+          description: The payroll date on which the deduction is expected.
+        authorization_expires_at:
+          type: [string, 'null']
+          format: date-time
+          description: |
+            While `approved`, the deadline (24h) to execute and confirm
+            a partner-ledger transfer before the advance becomes
+            `canceled`. Null for `executed_by: payslice` because the
+            external Vault/Rail service owns its payout lifecycle, and
+            null once a partner-ledger advance is no longer `approved`.
+        disbursement:
+          type: object
+          description: |
+            How funds reach the employee. v1: `executed_by: partner` —
+            the partner executes an instant internal move from
+            Payslice's vault on its ledger to the employee's account,
+            then confirms via the disbursement endpoint.
+            `executed_by: payslice` means EWA has handed the payout to
+            the external Vault/Rail service using the destination
+            supplied inline on the advance request.
+          additionalProperties: false
+          properties:
+            executed_by:
+              type: string
+              enum: [partner, payslice]
+            destination_account_id:
+              type: [string, 'null']
+              description: |
+                Present only for `executed_by: partner`.
+            payout_destination:
+              anyOf:
+                - $ref: '#/components/schemas/PayoutDestination'
+                - type: 'null'
+            crypto_transfer:
+              anyOf:
+                - $ref: '#/components/schemas/CryptoTransfer'
+                - type: 'null'
+            transfer_ref:
+              type: [string, 'null']
+              description: Partner-ledger transfer reference or final crypto transaction hash.
+            failure_reason:
+              type: [string, 'null']
+              description: |
+                Why execution failed, as reported by the partner at
+                confirmation or by the external Vault/Rail service. Set
+                only on `failed` advances.
+        created_at:
+          type: string
+          format: date-time
+        released_at:
+          type: [string, 'null']
+          format: date-time
+
+    PayoutDestination:
+      type: object
+      additionalProperties: false
+      required: [type, chain, network, address]
+      properties:
+        type:
+          type: string
+          enum: [crypto_wallet]
+        chain:
+          type: string
+          enum: [evm]
+        network:
+          type: string
+          description: Partner-configured network id.
+        address:
+          type: string
+          description: 0x-prefixed 20-byte EVM address.
+
+    CryptoTransfer:
+      type: object
+      additionalProperties: false
+      required:
+        - chain
+        - network
+        - asset
+        - token_contract
+        - token_decimals
+        - amount_base_units
+        - to_address
+        - tx_hash
+        - confirmations
+      properties:
+        chain:
+          type: string
+          enum: [evm]
+        network:
+          type: string
+        asset:
+          type: string
+          enum: [USDC, EURC]
+          description: Resolved from partner config and advance currency; no FX conversion in v1.
+        token_contract:
+          type: string
+        token_decimals:
+          type: integer
+        amount_base_units:
+          type: integer
+          format: int64
+        to_address:
+          type: string
+          description: Recipient wallet address proven by the final transfer evidence.
+        tx_hash:
+          type: [string, 'null']
+          description: Populated after the Vault/Rail service reports final settlement.
+        confirmations:
+          type: integer
+
+    CollectionsDue:
+      type: object
+      required: [items, totals]
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            required: [advance_id, user_id, company_id, amount, currency, due_date]
+            properties:
+              advance_id:
+                type: string
+              user_id:
+                type: string
+              company_id:
+                type: string
+              amount:
+                type: integer
+                description: Outstanding amount incl. fee, in minor units.
+              currency:
+                type: string
+              due_date:
+                type: string
+                format: date
+        totals:
+          type: array
+          description: Aggregate owed per currency across the returned filter.
+          items:
+            $ref: '#/components/schemas/Money'
+        next_cursor:
+          type: [string, 'null']
+
+    CollectionConfirmation:
+      type: object
+      required: [company_id, pay_date, items]
+      properties:
+        company_id:
+          type: string
+        pay_date:
+          type: string
+          format: date
+        items:
+          type: array
+          items:
+            type: object
+            required: [advance_id, status, currency]
+            properties:
+              advance_id:
+                type: string
+              amount_collected:
+                type: integer
+                description: Required unless status is `failed`.
+              currency:
+                type: string
+                description: |
+                  Must match the advance currency. Required on every
+                  item, including failed ones.
+              status:
+                type: string
+                enum: [collected, partial, failed]
+              ledger_credit_ref:
+                type: [string, 'null']
+                description: |
+                  Partner-ledger reference for the credit of the
+                  collected amount to Payslice's vault.
+              failure_reason:
+                type: string
+                description: Extensible partner-provided reason code, required when status is `failed`.
+
+    CollectionResult:
+      type: object
+      required: [advance_id, accepted, advance_status]
+      properties:
+        advance_id:
+          type: string
+        accepted:
+          type: boolean
+        advance_status:
+          $ref: '#/components/schemas/AdvanceStatus'
+        error:
+          type: [string, 'null']
+
+    VaultResponse:
+      type: object
+      description: |
+        Tenant-scoped vault state grouped by currency. Amounts are not
+        converted across currencies.
+      required: [vaults]
+      properties:
+        vaults:
+          type: array
+          items:
+            $ref: '#/components/schemas/Vault'
+
+    Vault:
+      type: object
+      description: |
+        Payslice's mirror of one vault currency on the partner's ledger.
+        The partner's ledger is the system of record for the cash;
+        Payslice's books are the system of record for advances. Daily
+        reconciliation compares the two — discrepancies pause releases.
+      required: [balance, available_balance, holds, pending_prefunds, accrued_partner_fees]
+      properties:
+        balance:
+          $ref: '#/components/schemas/Money'
+        available_balance:
+          $ref: '#/components/schemas/Money'
+          description: Balance net of approved-but-unexecuted authorizations.
+        holds:
+          $ref: '#/components/schemas/Money'
+          description: Active authorization holds reserved against this vault currency.
+        pending_prefunds:
+          type: array
+          description: |
+            Payslice top-ups in transit to the partner's ledger. Only
+            initiated/in-flight prefunds are listed; credited and failed
+            prefunds are excluded.
+          items:
+            allOf:
+              - $ref: '#/components/schemas/Money'
+              - type: object
+                properties:
+                  expected_at:
+                    type: [string, 'null']
+                    format: date
+        low_balance_threshold:
+          anyOf:
+            - $ref: '#/components/schemas/Money'
+            - type: 'null'
+          description: |
+            Below this, Payslice initiates a top-up; if the vault is
+            exhausted before it lands, new advances return 402. Present
+            only for currencies with configured threshold semantics.
+        accrued_partner_fees:
+          $ref: '#/components/schemas/Money'
+          description: |
+            The partner's accumulated fee share awaiting the monthly
+            payout (internal transfer from Payslice's vault to the
+            partner's own account). Returned as a positive partner-facing
+            amount; internally the payable ledger account may carry a
+            negative balance under signed accounting conventions.
+
+    WebhookEnvelope:
+      type: object
+      required: [event_id, type, api_version, created_at, data]
+      properties:
+        event_id:
+          type: string
+          description: Unique per event; use for consumer-side deduplication.
+        api_version:
+          type: string
+          description: Major API version the payload conforms to, e.g. "v1".
+          examples: [v1]
+        type:
+          type: string
+          enum:
+            - advance.approved
+            - advance.released
+            - advance.failed
+            - collection.due
+            - vault.low_balance
+        created_at:
+          type: string
+          format: date-time
+        data:
+          type: object
+
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          examples:
+            - quote_expired
+            - quote_already_used
+            - amount_exceeds_quote
+            - currency_mismatch
+            - insufficient_vault_balance
+            - exposure_limit_reached
+            - releases_paused
+        message:
+          type: string
+        details:
+          type: object
+          additionalProperties: true
