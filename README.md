@@ -120,6 +120,12 @@ switch (event.type) {
 
 See [`examples/webhook-express.ts`](./examples/webhook-express.ts) for a full Express handler.
 
+## Examples
+
+- [`examples/nextjs-demo`](./examples/nextjs-demo) — a runnable **Next.js** reference app walking the quote → advance → confirm flow, with a webhook receiver. Runs in mock mode with zero setup, or against the live sandbox when credentials are set.
+- [`examples/quickstart.ts`](./examples/quickstart.ts) — the core flow as a single script.
+- [`examples/webhook-express.ts`](./examples/webhook-express.ts) — webhook verification with Express.
+
 ## Development
 
 ```sh

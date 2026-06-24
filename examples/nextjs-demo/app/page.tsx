@@ -1,0 +1,260 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import type {
+  Advance,
+  CollectionsDue,
+  Money,
+  Quote,
+  VaultResponse,
+} from "@payslice/sdk";
+
+function fmt(amount: number | null | undefined, currency = "USD"): string {
+  if (amount == null) return "—";
+  return new Intl.NumberFormat("en-US", { style: "currency", currency }).format(
+    amount / 100,
+  );
+}
+
+async function postJson<T>(url: string, body: unknown): Promise<T> {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data?.error?.message ?? `${res.status}`);
+  return data as T;
+}
+
+export default function Home() {
+  const [mode, setMode] = useState<{ live: boolean; baseUrl: string } | null>(null);
+  const [form, setForm] = useState({
+    user_id: "employee_42",
+    company_id: "employer_7",
+    salary: "500000",
+    currency: "USD",
+    start_date: "2024-01-15",
+    due_date: "2026-07-31",
+  });
+  const [quote, setQuote] = useState<Quote | null>(null);
+  const [amount, setAmount] = useState("");
+  const [advance, setAdvance] = useState<Advance | null>(null);
+  const [vault, setVault] = useState<VaultResponse | null>(null);
+  const [collections, setCollections] = useState<CollectionsDue | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetch("/api/mode").then((r) => r.json()).then(setMode);
+    refreshSidebars();
+  }, []);
+
+  function refreshSidebars() {
+    fetch("/api/vault").then((r) => r.json()).then(setVault).catch(() => {});
+    fetch("/api/collections").then((r) => r.json()).then(setCollections).catch(() => {});
+  }
+
+  function set<K extends keyof typeof form>(key: K, value: string) {
+    setForm((f) => ({ ...f, [key]: value }));
+  }
+
+  async function createQuote() {
+    setBusy("quote"); setError(null); setQuote(null); setAdvance(null);
+    try {
+      const q = await postJson<Quote>("/api/quote", {
+        user_id: form.user_id,
+        company_id: form.company_id,
+        contract: { id: "contract_1", start_date: form.start_date },
+        salary: { amount: Number(form.salary), currency: form.currency, frequency: "monthly" },
+      });
+      setQuote(q);
+      if (q.amount != null) setAmount(String(q.amount));
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function createAdvance() {
+    if (!quote) return;
+    setBusy("advance"); setError(null);
+    try {
+      const a = await postJson<Advance>("/api/advance", {
+        quote_id: quote.id,
+        user_id: quote.user_id,
+        amount: Number(amount),
+        currency: quote.currency,
+        destination_account_id: "partner_ledger_acct_99",
+        due_date: form.due_date,
+      });
+      setAdvance(a);
+      refreshSidebars();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function confirm() {
+    if (!advance) return;
+    setBusy("confirm"); setError(null);
+    try {
+      const a = await postJson<Advance>(`/api/advance/${advance.id}/confirm`, {
+        status: "executed",
+        transfer_ref: `ledger_txn_${Date.now()}`,
+      });
+      setAdvance(a);
+      refreshSidebars();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <div className="wrap">
+      <header className="top">
+        <h1>Payslice <span>EWA</span> — SDK Demo</h1>
+        {mode && (
+          <span className={`mode ${mode.live ? "live" : "mock"}`}>
+            {mode.live ? `LIVE · ${mode.baseUrl}` : "MOCK MODE · no credentials set"}
+          </span>
+        )}
+      </header>
+      <p className="lede">
+        A reference Next.js integration for <code>@payslice/sdk</code>. Every Payslice
+        call runs server-side in <code>app/api/*</code> route handlers — the HMAC secret
+        never reaches the browser. Walk the flow: quote → advance → confirm.
+      </p>
+
+      <div className="grid">
+        {/* Left: the flow */}
+        <div>
+          <div className="card">
+            <h2><span className="num">1</span> Request a quote</h2>
+            <div className="row">
+              <div>
+                <label>Employee ID</label>
+                <input value={form.user_id} onChange={(e) => set("user_id", e.target.value)} />
+              </div>
+              <div>
+                <label>Employer ID</label>
+                <input value={form.company_id} onChange={(e) => set("company_id", e.target.value)} />
+              </div>
+            </div>
+            <div className="row">
+              <div>
+                <label>Monthly salary (cents)</label>
+                <input value={form.salary} onChange={(e) => set("salary", e.target.value)} />
+              </div>
+              <div>
+                <label>Currency</label>
+                <input value={form.currency} onChange={(e) => set("currency", e.target.value)} />
+              </div>
+            </div>
+            <button onClick={createQuote} disabled={busy === "quote"}>
+              {busy === "quote" ? "Requesting…" : "Get quote"}
+            </button>
+
+            {quote && (
+              <>
+                <div className="kv" style={{ marginTop: 14 }}>
+                  <span className="k">Status</span>
+                  <span className="v"><span className={`badge ${quote.status}`}>{quote.status}</span></span>
+                </div>
+                <div className="kv"><span className="k">Max advance</span><span className="v">{fmt(quote.amount, quote.currency ?? "USD")}</span></div>
+                <div className="kv"><span className="k">Fee</span><span className="v">{fmt(quote.fee, quote.currency ?? "USD")}</span></div>
+                <div className="kv"><span className="k">Quote ID</span><span className="v">{quote.id}</span></div>
+              </>
+            )}
+          </div>
+
+          {quote?.approved && (
+            <div className="card" style={{ marginTop: 16 }}>
+              <h2><span className="num">2</span> Draw down an advance</h2>
+              <label>Amount (cents, ≤ quoted)</label>
+              <input value={amount} onChange={(e) => setAmount(e.target.value)} />
+              <button onClick={createAdvance} disabled={busy === "advance"}>
+                {busy === "advance" ? "Releasing…" : "Create advance"}
+              </button>
+
+              {advance && (
+                <>
+                  <div className="kv" style={{ marginTop: 14 }}>
+                    <span className="k">Status</span>
+                    <span className="v"><span className={`badge ${advance.status}`}>{advance.status}</span></span>
+                  </div>
+                  <div className="kv"><span className="k">Amount</span><span className="v">{fmt(advance.amount, advance.currency)}</span></div>
+                  <div className="kv"><span className="k">Outstanding</span><span className="v">{fmt(advance.amount_outstanding, advance.currency)}</span></div>
+                  <div className="kv"><span className="k">Advance ID</span><span className="v">{advance.id}</span></div>
+                </>
+              )}
+            </div>
+          )}
+
+          {advance && advance.status === "approved" && (
+            <div className="card" style={{ marginTop: 16 }}>
+              <h2><span className="num">3</span> Confirm the disbursement</h2>
+              <p className="muted" style={{ margin: 0, fontSize: 13 }}>
+                After executing the transfer on your ledger, report it back. This moves
+                the advance to <code>released</code>.
+              </p>
+              <button onClick={confirm} disabled={busy === "confirm"}>
+                {busy === "confirm" ? "Confirming…" : "Confirm executed"}
+              </button>
+            </div>
+          )}
+
+          {error && <p className="err">⚠ {error}</p>}
+        </div>
+
+        {/* Right: live state */}
+        <div>
+          <div className="card">
+            <h2>Vault</h2>
+            {vault?.vaults?.length ? vault.vaults.map((v, i) => (
+              <div key={i}>
+                <div className="kv"><span className="k">Balance</span><span className="v">{money(v.balance)}</span></div>
+                <div className="kv"><span className="k">Available</span><span className="v">{money(v.available_balance)}</span></div>
+                <div className="kv"><span className="k">Holds</span><span className="v">{money(v.holds)}</span></div>
+                <div className="kv"><span className="k">Accrued fees</span><span className="v">{money(v.accrued_partner_fees)}</span></div>
+              </div>
+            )) : <p className="muted">No vault data.</p>}
+          </div>
+
+          <div className="card" style={{ marginTop: 16 }}>
+            <h2>Collections due</h2>
+            {collections?.items?.length ? (
+              <>
+                {collections.items.map((it) => (
+                  <div className="kv" key={it.advance_id}>
+                    <span className="k">{it.user_id} · {it.due_date}</span>
+                    <span className="v">{fmt(it.amount, it.currency)}</span>
+                  </div>
+                ))}
+                <div className="kv" style={{ marginTop: 6 }}>
+                  <span className="k">Total</span>
+                  <span className="v">{collections.totals.map(money).join(" · ")}</span>
+                </div>
+              </>
+            ) : <p className="muted">Nothing due.</p>}
+          </div>
+        </div>
+      </div>
+
+      <footer>
+        Source: <code>examples/nextjs-demo</code> in{" "}
+        <a href="https://github.com/free-doom/payslice-typescript-sdk">payslice-typescript-sdk</a>.
+        Set <code>PAYSLICE_KEY_ID</code> / <code>PAYSLICE_SECRET</code> to switch from mock to the live sandbox.
+      </footer>
+    </div>
+  );
+}
+
+function money(m: Money): string {
+  return fmt(m.amount, m.currency);
+}
