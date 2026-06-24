@@ -2,10 +2,22 @@
   "name": "@payslice/sdk",
   "version": "0.1.0",
   "description": "Official TypeScript SDK for the Payslice Earned Wage Access (EWA) partner API.",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "type": "module",
   "engines": {
     "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/free-doom/payslice-typescript-sdk.git"
+  },
+  "homepage": "https://github.com/free-doom/payslice-typescript-sdk#readme",
+  "bugs": {
+    "url": "https://github.com/free-doom/payslice-typescript-sdk/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": false
   },
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",

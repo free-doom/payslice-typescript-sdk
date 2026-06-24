@@ -133,6 +133,19 @@ npm run build
 
 > `baseUrl` must be the host **without** a `/v1` suffix (the SDK adds it). Use `https://sandbox-api.payslice.com`, not `.../v1`.
 
+## Releasing
+
+Publishing is automated. Bump the version, tag, and push — CI runs the full
+gate (spec drift-check, typecheck, tests, build) and publishes to npm:
+
+```sh
+npm version patch   # or minor / major — updates package.json and creates the tag
+git push --follow-tags
+```
+
+The npm credential lives only in the repo secret `NPM_TOKEN`; nobody publishes
+from a laptop.
+
 ## License
 
-UNLICENSED — internal/partner distribution.
+[MIT](./LICENSE)
