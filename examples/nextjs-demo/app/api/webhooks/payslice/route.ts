@@ -8,13 +8,22 @@ import { constructEvent, WebhookVerificationError } from "@payslice/sdk";
 // won't match. App Router does not buffer/parse the body for us here, so this
 // is exactly the raw payload Payslice signed.
 export async function POST(req: NextRequest) {
+  const secret = process.env.PAYSLICE_WEBHOOK_SECRET;
+  if (!secret) {
+    // Fail clearly instead of attempting verification with an empty key.
+    return NextResponse.json(
+      { error: "PAYSLICE_WEBHOOK_SECRET is not set; cannot verify webhooks." },
+      { status: 503 },
+    );
+  }
+
   const raw = await req.text();
 
   try {
     const event = await constructEvent({
       payload: raw,
       headers: req.headers,
-      secret: process.env.PAYSLICE_WEBHOOK_SECRET ?? "",
+      secret,
       // The URL you registered with Payslice; the SDK derives the signed path.
       endpointUrl: process.env.PAYSLICE_WEBHOOK_URL,
     });
