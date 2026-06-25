@@ -8,6 +8,10 @@ It handles the parts that are easy to get wrong — HMAC request signing, idempo
 - **Fully typed** — request/response types mirror the OpenAPI contract 1:1.
 - **Drop-in webhooks** — verify and narrow inbound events with one call.
 
+## 🚀 Live demo
+
+**[payslice-sdk-demo.vercel.app](https://payslice-sdk-demo.vercel.app)** — a Next.js app running against the live sandbox. Walk the full lifecycle in the browser: quote → advance → confirm → repay, with live vault and collections. Source: [`examples/nextjs-demo`](./examples/nextjs-demo).
+
 ## Install
 
 ```sh
@@ -122,7 +126,7 @@ See [`examples/webhook-express.ts`](./examples/webhook-express.ts) for a full Ex
 
 ## Examples
 
-- [`examples/nextjs-demo`](./examples/nextjs-demo) — a runnable **Next.js** reference app walking the quote → advance → confirm flow, with a webhook receiver. Runs in mock mode with zero setup, or against the live sandbox when credentials are set.
+- [`examples/nextjs-demo`](./examples/nextjs-demo) — a runnable **Next.js** reference app covering the full lifecycle (quote → advance → confirm → repay) with vault, collections, and a webhook receiver. **[Live demo →](https://payslice-sdk-demo.vercel.app)** Runs in mock mode with zero setup, or against the live sandbox when credentials are set.
 - [`examples/quickstart.ts`](./examples/quickstart.ts) — the core flow as a single script.
 - [`examples/webhook-express.ts`](./examples/webhook-express.ts) — webhook verification with Express.
 

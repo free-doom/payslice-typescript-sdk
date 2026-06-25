@@ -16,6 +16,16 @@ function fmt(amount: number | null | undefined, currency = "USD"): string {
   );
 }
 
+/** The last 3 month-end pay settlements at the given amount (most recent first). */
+function recentSettlements(amount: number, currency: string) {
+  const today = new Date();
+  return [1, 2, 3].map((i) => {
+    // Day 0 of (month - i + 1) = last day of (month - i).
+    const d = new Date(today.getFullYear(), today.getMonth() - i + 1, 0);
+    return { amount, currency, date: d.toISOString().slice(0, 10) };
+  });
+}
+
 async function postJson<T>(url: string, body: unknown): Promise<T> {
   const res = await fetch(url, {
     method: "POST",
@@ -45,6 +55,11 @@ export default function Home() {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // Pay-settlement history sent with every quote — the risk engine needs
+  // recent settlements to approve. Derived from the salary so the panel below
+  // shows exactly what gets sent.
+  const settlements = recentSettlements(Number(form.salary) || 0, form.currency);
+
   useEffect(() => {
     fetch("/api/mode").then((r) => r.json()).then(setMode);
     refreshSidebars();
@@ -67,6 +82,8 @@ export default function Home() {
         company_id: form.company_id,
         contract: { id: "contract_1", start_date: form.start_date },
         salary: { amount: Number(form.salary), currency: form.currency, frequency: "monthly" },
+        // Recent pay-settlement history; the risk engine needs this to approve.
+        settlements,
       });
       setQuote(q);
       if (q.amount != null) setAmount(String(q.amount));
@@ -90,6 +107,19 @@ export default function Home() {
         due_date: form.due_date,
       });
       setAdvance(a);
+      refreshSidebars();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function repay() {
+    if (!collections?.items?.length) return;
+    setBusy("repay"); setError(null);
+    try {
+      await postJson("/api/collections/confirm", { items: collections.items });
       refreshSidebars();
     } catch (e) {
       setError((e as Error).message);
@@ -156,6 +186,22 @@ export default function Home() {
                 <input value={form.currency} onChange={(e) => set("currency", e.target.value)} />
               </div>
             </div>
+            <label style={{ marginTop: 14 }}>
+              Settlement history (sent with the quote)
+            </label>
+            <div style={{ background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 11px" }}>
+              {settlements.map((s) => (
+                <div className="kv" key={s.date}>
+                  <span className="k">{s.date}</span>
+                  <span className="v">{fmt(s.amount, s.currency)}</span>
+                </div>
+              ))}
+            </div>
+            <p className="muted" style={{ fontSize: 12, margin: "6px 0 0" }}>
+              The risk engine needs recent settlements to approve. The demo
+              derives the last 3 months from the salary above.
+            </p>
+
             <button onClick={createQuote} disabled={busy === "quote"}>
               {busy === "quote" ? "Requesting…" : "Get quote"}
             </button>
@@ -166,6 +212,14 @@ export default function Home() {
                   <span className="k">Status</span>
                   <span className="v"><span className={`badge ${quote.status}`}>{quote.status}</span></span>
                 </div>
+                {!quote.approved && (quote.decline_reasons?.length ?? 0) > 0 && (
+                  <div className="kv">
+                    <span className="k">Decline reason</span>
+                    <span className="v" style={{ color: "var(--danger)" }}>
+                      {quote.decline_reasons!.join(", ")}
+                    </span>
+                  </div>
+                )}
                 <div className="kv"><span className="k">Max advance</span><span className="v">{fmt(quote.amount, quote.currency ?? "USD")}</span></div>
                 <div className="kv"><span className="k">Fee</span><span className="v">{fmt(quote.fee, quote.currency ?? "USD")}</span></div>
                 <div className="kv"><span className="k">Quote ID</span><span className="v">{quote.id}</span></div>
@@ -240,6 +294,13 @@ export default function Home() {
                   <span className="k">Total</span>
                   <span className="v">{collections.totals.map(money).join(" · ")}</span>
                 </div>
+                <button className="ghost" onClick={repay} disabled={busy === "repay"}>
+                  {busy === "repay" ? "Reporting…" : "Confirm collection (repay)"}
+                </button>
+                <p className="muted" style={{ fontSize: 12, margin: "6px 0 0" }}>
+                  Reports these as collected at payroll — repays the advances and
+                  credits the amount back to the vault.
+                </p>
               </>
             ) : <p className="muted">Nothing due.</p>}
           </div>
