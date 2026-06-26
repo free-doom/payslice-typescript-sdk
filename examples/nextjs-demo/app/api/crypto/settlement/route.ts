@@ -18,11 +18,18 @@ export async function GET(req: NextRequest) {
 
   const cfg = railConfig();
   try {
+    // Expected on-chain amount: cents -> token base units (e.g. 500 -> 5_000_000 at 6dp).
+    const expectedValue =
+      amountMinor > 0 && cfg.decimals >= 2
+        ? BigInt(amountMinor) * 10n ** BigInt(cfg.decimals - 2)
+        : undefined;
     const settlement = await findSettlement({
       rpcUrl: cfg.rpcUrl,
       token: cfg.token,
       recipient,
       fromBlock: BigInt(q.get("fromBlock") ?? "0"),
+      safe: cfg.safe,
+      expectedValue,
     });
 
     if (!settlement) {

@@ -72,6 +72,13 @@ ssh -i <key>.pem -L 8090:127.0.0.1:8090 ubuntu@<box-ip>   # in a separate shell
 > but it means the settled mock tokens aren't recoverable. Paste your own
 > address in the form if you want to keep them.
 
+> **⚠️ Security.** The live `/api/crypto/payout` route signs real (testnet) Vault/Rail
+> payouts with server-side credentials and has **no per-request auth** — so by
+> default it is **served only to `localhost`** (the rail is reached over an SSH
+> tunnel on your machine). **Don't deploy the live crypto page publicly.** Payouts
+> are also capped at `VAULT_RAIL_MAX_AMOUNT_MINOR`. Only set `VAULT_RAIL_ALLOW_REMOTE=1`
+> if you've put your own authentication in front of the route.
+
 ## Webhooks
 
 Point a registered Payslice webhook endpoint at `/api/webhooks/payslice` and set:

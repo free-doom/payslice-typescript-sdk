@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
+  assertLiveAllowed,
   createPayoutAuthorization,
   isRailLive,
   railConfig,
@@ -15,17 +16,22 @@ import { mockPayout, type PayoutResult } from "@/lib/crypto-mock";
 // authorization time so the settlement scan is cheaply bounded.
 export async function POST(req: NextRequest) {
   try {
-    const { amountMinor, recipient } = validatePayoutInput(await req.json().catch(() => ({})));
+    const { amountMinor, recipient, idempotencyKey } = validatePayoutInput(
+      await req.json().catch(() => ({})),
+    );
 
     if (!isRailLive()) {
       return NextResponse.json(mockPayout(recipient));
     }
 
+    // Live, money-moving path: default-deny non-localhost callers.
+    assertLiveAllowed(req.headers.get("host"));
+
     const cfg = railConfig();
     const fromBlock = await currentBlock(cfg.rpcUrl);
-    // A fresh advance id per run; doubles as the idempotency key.
-    const advanceId = `demo-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
-    const auth = await createPayoutAuthorization({ amountMinor, recipient, advanceId });
+    // The client-supplied idempotency key doubles as the advance id, so a retry
+    // after a mid-flight failure replays instead of firing a second transfer.
+    const auth = await createPayoutAuthorization({ amountMinor, recipient, advanceId: idempotencyKey });
 
     const result: PayoutResult = {
       ...auth,

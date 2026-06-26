@@ -1,5 +1,6 @@
 import { signRequest } from "@payslice/sdk";
 import { NextResponse } from "next/server";
+import { randomHex } from "./rand";
 
 /** How long to wait on the rail before giving up (it's reached over an SSH tunnel). */
 const RAIL_TIMEOUT_MS = 15_000;
@@ -150,9 +151,28 @@ export function railErrorResponse(err: unknown, code = "rail_error"): NextRespon
   );
 }
 
-/** Validate a payout request body. Throws an Error with `status = 400` on bad input. */
-export function validatePayoutInput(raw: unknown): { amountMinor: number; recipient: string } {
-  const body = (raw ?? {}) as { amountMinor?: unknown; recipient?: unknown };
+/** Hard server-side cap on a single demo payout (minor units). Bounds the blast
+ *  radius even if the route is reached directly. Override with VAULT_RAIL_MAX_AMOUNT_MINOR. */
+function maxAmountMinor(): number {
+  const v = Number(process.env.VAULT_RAIL_MAX_AMOUNT_MINOR ?? "100000"); // $1,000
+  return Number.isFinite(v) && v > 0 ? v : 100_000;
+}
+
+/**
+ * Validate a payout request body. Throws an Error with `status = 400` on bad input.
+ * Returns a stable `idempotencyKey`: the caller's if provided (so a retry replays
+ * instead of double-paying), otherwise a freshly generated one.
+ */
+export function validatePayoutInput(raw: unknown): {
+  amountMinor: number;
+  recipient: string;
+  idempotencyKey: string;
+} {
+  const body = (raw ?? {}) as {
+    amountMinor?: unknown;
+    recipient?: unknown;
+    idempotencyKey?: unknown;
+  };
   const amountMinor = Number(body.amountMinor);
   const recipient = String(body.recipient ?? "");
   const fail = (message: string) => {
@@ -163,8 +183,38 @@ export function validatePayoutInput(raw: unknown): { amountMinor: number; recipi
   if (!Number.isInteger(amountMinor) || amountMinor <= 0) {
     throw fail("amountMinor must be a positive integer (minor units / cents).");
   }
+  if (amountMinor > maxAmountMinor()) {
+    throw fail(`amountMinor exceeds the demo cap of ${maxAmountMinor()} minor units.`);
+  }
   if (!/^0x[0-9a-fA-F]{40}$/.test(recipient)) {
     throw fail("recipient must be a 0x-prefixed 20-byte address.");
   }
-  return { amountMinor, recipient };
+  let idempotencyKey = typeof body.idempotencyKey === "string" ? body.idempotencyKey : "";
+  if (idempotencyKey) {
+    if (!/^[A-Za-z0-9._-]{8,128}$/.test(idempotencyKey)) {
+      throw fail("idempotencyKey must be 8-128 chars of [A-Za-z0-9._-].");
+    }
+  } else {
+    idempotencyKey = `demo-${Date.now()}-${randomHex(6)}`;
+  }
+  return { amountMinor, recipient, idempotencyKey };
+}
+
+/**
+ * Guard the LIVE money-moving route. The Vault/Rail rail is meant to be reached
+ * over an SSH tunnel on the operator's own machine, so by default we only serve
+ * the live payout endpoint to localhost — a public deployment with VAULT_RAIL_*
+ * set would otherwise be an unauthenticated endpoint that signs real payouts.
+ * Set VAULT_RAIL_ALLOW_REMOTE=1 ONLY if you've put your own auth in front of it.
+ */
+export function assertLiveAllowed(host: string | null): void {
+  if (process.env.VAULT_RAIL_ALLOW_REMOTE === "1") return;
+  const h = (host ?? "").split(":")[0].toLowerCase();
+  if (h === "localhost" || h === "127.0.0.1" || h === "::1" || h === "[::1]") return;
+  const err = new Error(
+    "Live crypto payouts are restricted to localhost (reach the rail via an SSH tunnel). " +
+      "Set VAULT_RAIL_ALLOW_REMOTE=1 only behind your own authentication.",
+  ) as Error & { status?: number };
+  err.status = 403;
+  throw err;
 }

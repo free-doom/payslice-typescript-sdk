@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { postJson } from "@/lib/http";
-import { freshAddress } from "@/lib/rand";
+import { freshAddress, randomHex } from "@/lib/rand";
 import type { PayoutResult, SettlementResult } from "@/lib/crypto-mock";
 
 interface Mode {
@@ -45,6 +45,10 @@ export default function CryptoPayout() {
   // stale poll (after Reset or a new Send) can't clobber the latest run's state.
   const runIdRef = useRef(0);
 
+  // Stable idempotency key for the payout: reused if a send fails and the user
+  // retries the SAME amount+recipient, so the rail replays instead of paying twice.
+  const idemRef = useRef<{ key: string; amount: number; recipient: string } | null>(null);
+
   useEffect(() => {
     fetch("/api/crypto/mode").then((r) => r.json()).then(setMode).catch(() => {});
     setRecipient(freshAddress());
@@ -56,6 +60,7 @@ export default function CryptoPayout() {
 
   function reset(newRecipient = true) {
     runIdRef.current += 1; // cancel any in-flight poll
+    idemRef.current = null; // next send is a new payout intent
     setPayout(null);
     setSettlement(null);
     setError(null);
@@ -71,13 +76,28 @@ export default function CryptoPayout() {
     }
     const runId = runIdRef.current + 1;
     runIdRef.current = runId; // supersedes any prior run/poll
+
+    // Reuse the idempotency key only for a retry of the SAME amount+recipient.
+    if (
+      !idemRef.current ||
+      idemRef.current.amount !== amountMinor ||
+      idemRef.current.recipient !== recipient
+    ) {
+      idemRef.current = { key: `demo-${Date.now()}-${randomHex(6)}`, amount: amountMinor, recipient };
+    }
+    const idempotencyKey = idemRef.current.key;
+
     setPayout(null);
     setSettlement(null);
     setError(null);
     setPhase("authorizing");
 
     try {
-      const p = await postJson<PayoutResult>("/api/crypto/payout", { amountMinor, recipient });
+      const p = await postJson<PayoutResult>("/api/crypto/payout", {
+        amountMinor,
+        recipient,
+        idempotencyKey,
+      });
       if (runId !== runIdRef.current) return; // superseded while awaiting
       setPayout(p);
       setPhase("confirming");
@@ -104,6 +124,7 @@ export default function CryptoPayout() {
         }
         setSettlement(s);
         if (s.status === "confirmed") {
+          idemRef.current = null; // settled — next send is a new payout
           setPhase("done");
           return;
         }
