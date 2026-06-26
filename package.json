@@ -1,0 +1,66 @@
+{
+  "name": "@payslice/sdk",
+  "version": "0.1.0",
+  "description": "Official TypeScript SDK for the Payslice Earned Wage Access (EWA) partner API.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/free-doom/payslice-typescript-sdk.git"
+  },
+  "homepage": "https://github.com/free-doom/payslice-typescript-sdk#readme",
+  "bugs": {
+    "url": "https://github.com/free-doom/payslice-typescript-sdk/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsup",
+    "generate": "openapi-typescript ./openapi.yaml -o ./src/generated/types.ts",
+    "generate:check": "openapi-typescript ./openapi.yaml -o ./src/generated/types.ts && git diff --exit-code -- ./src/generated/types.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.0",
+    "openapi-typescript": "^7.5.0",
+    "tsup": "^8.3.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  },
+  "keywords": [
+    "payslice",
+    "ewa",
+    "earned-wage-access",
+    "sdk",
+    "fintech"
+  ]
+}
