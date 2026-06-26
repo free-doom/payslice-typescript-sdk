@@ -1,3 +1,5 @@
+import { randomHex } from "./rand";
+
 /**
  * Canned crypto-payout responses for mock mode (no rail, no chain, no keys), so
  * the /crypto page is fully interactive with zero setup — mirroring lib/mock.ts.
@@ -23,25 +25,23 @@ export interface SettlementResult {
   value?: string;
   confirmations?: number;
   explorerUrl?: string;
+  note?: string; // transient scan diagnostic (live mode)
   mock: boolean;
 }
 
-function hex(len: number): string {
-  const bytes = new Uint8Array(len);
-  crypto.getRandomValues(bytes);
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
-}
-
 const MOCK_EXPLORER = "https://sepolia.basescan.org";
+const MOCK_TOKEN_DECIMALS = 6; // mock USDC/EURC
+const MINOR_DECIMALS = 2; // cents
+const MOCK_CONFIRMATIONS = 16;
 
 export function mockPayout(recipient: string): PayoutResult {
   return {
-    reservation_ref: `vrs_${hex(16)}`,
-    payout_ref: `vpo_${hex(16)}`,
+    reservation_ref: `vrs_${randomHex(16)}`,
+    payout_ref: `vpo_${randomHex(16)}`,
     status: "reserved",
     recipient,
     token: "0x0000000000000000000000000000000000000000",
-    decimals: 6,
+    decimals: MOCK_TOKEN_DECIMALS,
     fromBlock: 0,
     explorerBase: MOCK_EXPLORER,
     mock: true,
@@ -54,13 +54,15 @@ export function mockPayout(recipient: string): PayoutResult {
  */
 export function mockSettlement(amountMinor: number, attempt: number): SettlementResult {
   if (attempt < 2) return { status: "pending", mock: true };
-  const txHash = `0x${hex(32)}`;
+  const txHash = `0x${randomHex(32)}`;
+  // cents -> token base units, e.g. $5.00 (500) -> 5_000_000 at 6 decimals.
+  const value = String(amountMinor * 10 ** (MOCK_TOKEN_DECIMALS - MINOR_DECIMALS));
   return {
     status: "confirmed",
     txHash,
-    blockNumber: 43_300_000 + attempt,
-    value: String(amountMinor * 10_000), // cents -> 6-decimal base units
-    confirmations: 16,
+    blockNumber: 0, // mock: no real chain height
+    value,
+    confirmations: MOCK_CONFIRMATIONS,
     explorerUrl: `${MOCK_EXPLORER}/tx/${txHash}`,
     mock: true,
   };

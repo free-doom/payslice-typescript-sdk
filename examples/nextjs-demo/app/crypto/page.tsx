@@ -1,7 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import { postJson } from "@/lib/http";
+import { freshAddress } from "@/lib/rand";
 import type { PayoutResult, SettlementResult } from "@/lib/crypto-mock";
 
 interface Mode {
@@ -16,13 +18,11 @@ interface Mode {
 
 type Phase = "idle" | "authorizing" | "confirming" | "done" | "error";
 
-function freshAddress(): string {
-  const bytes = new Uint8Array(20);
-  crypto.getRandomValues(bytes);
-  return "0x" + Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
-}
+const POLL_INTERVAL_MS = 4000;
+const MAX_POLLS = 45; // ~3 minutes
 
 function fmtUsd(minor: number, currency = "USD"): string {
+  // amount_minor is in cents (2-decimal minor units), system-wide.
   return new Intl.NumberFormat("en-US", { style: "currency", currency }).format(minor / 100);
 }
 
@@ -30,16 +30,7 @@ function short(addr: string): string {
   return addr.length > 14 ? `${addr.slice(0, 8)}…${addr.slice(-6)}` : addr;
 }
 
-async function postJson<T>(url: string, body: unknown): Promise<T> {
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data?.error?.message ?? `${res.status}`);
-  return data as T;
-}
+const STEPS = ["Authorizing", "Reserved", "Settling on-chain", "Confirmed"] as const;
 
 export default function CryptoPayout() {
   const [mode, setMode] = useState<Mode | null>(null);
@@ -50,12 +41,21 @@ export default function CryptoPayout() {
   const [phase, setPhase] = useState<Phase>("idle");
   const [error, setError] = useState<string | null>(null);
 
+  // Identifies the current run. Bumping it cancels any in-flight poll chain so a
+  // stale poll (after Reset or a new Send) can't clobber the latest run's state.
+  const runIdRef = useRef(0);
+
   useEffect(() => {
     fetch("/api/crypto/mode").then((r) => r.json()).then(setMode).catch(() => {});
     setRecipient(freshAddress());
+    // Cancel any pending poll if the component unmounts.
+    return () => {
+      runIdRef.current += 1;
+    };
   }, []);
 
   function reset(newRecipient = true) {
+    runIdRef.current += 1; // cancel any in-flight poll
     setPayout(null);
     setSettlement(null);
     setError(null);
@@ -69,15 +69,22 @@ export default function CryptoPayout() {
       setError("Amount must be a positive integer in minor units (cents).");
       return;
     }
-    reset(false);
+    const runId = runIdRef.current + 1;
+    runIdRef.current = runId; // supersedes any prior run/poll
+    setPayout(null);
+    setSettlement(null);
+    setError(null);
     setPhase("authorizing");
+
     try {
       const p = await postJson<PayoutResult>("/api/crypto/payout", { amountMinor, recipient });
+      if (runId !== runIdRef.current) return; // superseded while awaiting
       setPayout(p);
       setPhase("confirming");
 
       let attempt = 0;
       const poll = async () => {
+        if (runId !== runIdRef.current) return; // a newer run/reset took over
         attempt += 1;
         const params = new URLSearchParams({
           recipient,
@@ -88,6 +95,8 @@ export default function CryptoPayout() {
         const s = (await fetch(`/api/crypto/settlement?${params}`).then((r) => r.json())) as
           | SettlementResult
           | { error: { message: string } };
+        if (runId !== runIdRef.current) return; // superseded while awaiting
+
         if ("error" in s) {
           setError(s.error.message);
           setPhase("error");
@@ -98,7 +107,7 @@ export default function CryptoPayout() {
           setPhase("done");
           return;
         }
-        if (attempt < 45) setTimeout(poll, 4000);
+        if (attempt < MAX_POLLS) setTimeout(poll, POLL_INTERVAL_MS);
         else {
           setError("Timed out waiting for the settlement transfer.");
           setPhase("error");
@@ -106,6 +115,7 @@ export default function CryptoPayout() {
       };
       poll();
     } catch (e) {
+      if (runId !== runIdRef.current) return;
       setError((e as Error).message);
       setPhase("error");
     }
@@ -116,33 +126,19 @@ export default function CryptoPayout() {
   const tokenAmount =
     settlement?.value != null ? Number(settlement.value) / 10 ** decimals : null;
 
-  const steps: { key: Phase | "reserved"; label: string }[] = [
-    { key: "authorizing", label: "Authorizing" },
-    { key: "reserved", label: "Reserved" },
-    { key: "confirming", label: "Settling on-chain" },
-    { key: "done", label: "Confirmed" },
-  ];
-  function stepState(key: string): "done" | "active" | "todo" {
-    const order = ["authorizing", "reserved", "confirming", "done"];
-    const cur =
-      phase === "idle"
-        ? -1
-        : phase === "authorizing"
-          ? 0
-          : phase === "confirming"
-            ? settlement?.status === "confirmed"
-              ? 3
-              : 2
-            : phase === "done"
-              ? 3
-              : payout
-                ? 1
-                : 0;
-    const idx = order.indexOf(key);
-    if (idx < cur) return "done";
-    if (idx === cur) return "active";
-    return "todo";
-  }
+  // Index of the active step (0..3); everything before it is done, after it todo.
+  const activeIndex =
+    phase === "done" || settlement?.status === "confirmed"
+      ? 3
+      : phase === "authorizing"
+        ? 0
+        : phase === "confirming"
+          ? 2
+          : payout
+            ? 1
+            : -1;
+  const stepState = (i: number): "done" | "active" | "todo" =>
+    i < activeIndex ? "done" : i === activeIndex ? "active" : "todo";
 
   return (
     <div className="wrap">
@@ -225,15 +221,15 @@ export default function CryptoPayout() {
           </h2>
 
           <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 8 }}>
-            {steps.map((s) => {
-              const st = stepState(s.key);
+            {STEPS.map((label, i) => {
+              const st = stepState(i);
               return (
-                <div key={s.key} className="kv" style={{ borderBottom: "none", padding: "3px 0" }}>
+                <div key={label} className="kv" style={{ borderBottom: "none", padding: "3px 0" }}>
                   <span className="k">
-                    {st === "done" ? "✓" : st === "active" ? "●" : "○"} {s.label}
+                    {st === "done" ? "✓" : st === "active" ? "●" : "○"} {label}
                   </span>
                   <span className="v" style={{ opacity: st === "todo" ? 0.4 : 1 }}>
-                    {s.key === "reserved" && payout ? payout.status : ""}
+                    {i === 1 && payout ? payout.status : ""}
                   </span>
                 </div>
               );

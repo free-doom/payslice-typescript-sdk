@@ -1,5 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createPayoutAuthorization, isRailLive, railConfig } from "@/lib/vault-rail";
+import {
+  createPayoutAuthorization,
+  isRailLive,
+  railConfig,
+  railErrorResponse,
+  validatePayoutInput,
+} from "@/lib/vault-rail";
 import { currentBlock } from "@/lib/chain";
 import { mockPayout, type PayoutResult } from "@/lib/crypto-mock";
 
@@ -8,17 +14,14 @@ import { mockPayout, type PayoutResult } from "@/lib/crypto-mock";
 // broadcasts it, moving tokens out of the Safe. We capture the chain head at
 // authorization time so the settlement scan is cheaply bounded.
 export async function POST(req: NextRequest) {
-  const { amountMinor, recipient } = (await req.json()) as {
-    amountMinor: number;
-    recipient: string;
-  };
-
-  if (!isRailLive()) {
-    return NextResponse.json(mockPayout(recipient));
-  }
-
-  const cfg = railConfig();
   try {
+    const { amountMinor, recipient } = validatePayoutInput(await req.json().catch(() => ({})));
+
+    if (!isRailLive()) {
+      return NextResponse.json(mockPayout(recipient));
+    }
+
+    const cfg = railConfig();
     const fromBlock = await currentBlock(cfg.rpcUrl);
     // A fresh advance id per run; doubles as the idempotency key.
     const advanceId = `demo-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
@@ -35,10 +38,6 @@ export async function POST(req: NextRequest) {
     };
     return NextResponse.json(result);
   } catch (err) {
-    const status = (err as { status?: number }).status ?? 502;
-    return NextResponse.json(
-      { error: { code: "rail_error", message: (err as Error).message } },
-      { status },
-    );
+    return railErrorResponse(err);
   }
 }

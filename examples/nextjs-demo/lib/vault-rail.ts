@@ -1,4 +1,8 @@
 import { signRequest } from "@payslice/sdk";
+import { NextResponse } from "next/server";
+
+/** How long to wait on the rail before giving up (it's reached over an SSH tunnel). */
+const RAIL_TIMEOUT_MS = 15_000;
 
 /**
  * Server-only helper for the Payslice **Vault/Rail** custody service — the
@@ -99,15 +103,28 @@ export async function createPayoutAuthorization(args: {
     body,
   });
 
-  const res = await fetch(`${cfg.baseUrl}${PATH}`, {
-    method: "POST",
-    headers: {
-      ...headers,
-      "content-type": "application/json",
-      "idempotency-key": args.advanceId,
-    },
-    body,
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${cfg.baseUrl}${PATH}`, {
+      method: "POST",
+      headers: {
+        ...headers,
+        "content-type": "application/json",
+        "idempotency-key": args.advanceId,
+      },
+      body,
+      // Don't hang forever if the rail (via the SSH tunnel) accepts but never responds.
+      signal: AbortSignal.timeout(RAIL_TIMEOUT_MS),
+    });
+  } catch (cause) {
+    const reason =
+      cause instanceof DOMException && cause.name === "TimeoutError"
+        ? `rail did not respond within ${RAIL_TIMEOUT_MS / 1000}s (is the SSH tunnel up?)`
+        : `could not reach the rail at ${cfg.baseUrl} (${(cause as Error).message})`;
+    const err = new Error(reason) as Error & { status?: number };
+    err.status = 504;
+    throw err;
+  }
 
   const text = await res.text();
   if (!res.ok) {
@@ -122,4 +139,32 @@ export async function createPayoutAuthorization(args: {
     throw err;
   }
   return JSON.parse(text) as PayoutAuthorizationResponse;
+}
+
+/** Map a thrown error to the demo's error JSON shape, preserving any `status`. */
+export function railErrorResponse(err: unknown, code = "rail_error"): NextResponse {
+  const status = (err as { status?: number }).status ?? 502;
+  return NextResponse.json(
+    { error: { code, message: (err as Error).message } },
+    { status },
+  );
+}
+
+/** Validate a payout request body. Throws an Error with `status = 400` on bad input. */
+export function validatePayoutInput(raw: unknown): { amountMinor: number; recipient: string } {
+  const body = (raw ?? {}) as { amountMinor?: unknown; recipient?: unknown };
+  const amountMinor = Number(body.amountMinor);
+  const recipient = String(body.recipient ?? "");
+  const fail = (message: string) => {
+    const err = new Error(message) as Error & { status?: number };
+    err.status = 400;
+    return err;
+  };
+  if (!Number.isInteger(amountMinor) || amountMinor <= 0) {
+    throw fail("amountMinor must be a positive integer (minor units / cents).");
+  }
+  if (!/^0x[0-9a-fA-F]{40}$/.test(recipient)) {
+    throw fail("recipient must be a 0x-prefixed 20-byte address.");
+  }
+  return { amountMinor, recipient };
 }

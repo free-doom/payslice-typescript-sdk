@@ -40,9 +40,14 @@ export async function GET(req: NextRequest) {
     };
     return NextResponse.json(res);
   } catch (err) {
-    return NextResponse.json(
-      { error: { code: "scan_error", message: (err as Error).message } },
-      { status: 502 },
-    );
+    // A scan hiccup (RPC rate limit, transient range error) must NOT end the
+    // poll — the transfer may still settle. Report pending with a note and let
+    // the client keep polling until it confirms or hits its attempt cap.
+    const res: SettlementResult = {
+      status: "pending",
+      mock: false,
+      note: `scan retry: ${(err as Error).message}`,
+    };
+    return NextResponse.json(res);
   }
 }

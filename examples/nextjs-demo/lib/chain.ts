@@ -50,7 +50,9 @@ export async function findSettlement(args: {
   });
   if (logs.length === 0) return null;
 
-  const log = logs[0];
+  // Newest matching transfer (getLogs is ascending): if the same recipient is
+  // reused across runs, the most recent transfer at/after fromBlock is this run's.
+  const log = logs[logs.length - 1];
   const head = await pc.getBlockNumber();
   return {
     txHash: log.transactionHash,

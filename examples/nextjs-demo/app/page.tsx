@@ -9,6 +9,7 @@ import type {
   Quote,
   VaultResponse,
 } from "@payslice/sdk";
+import { postJson } from "@/lib/http";
 
 function fmt(amount: number | null | undefined, currency = "USD"): string {
   if (amount == null) return "—";
@@ -25,17 +26,6 @@ function recentSettlements(amount: number, currency: string) {
     const d = new Date(today.getFullYear(), today.getMonth() - i + 1, 0);
     return { amount, currency, date: d.toISOString().slice(0, 10) };
   });
-}
-
-async function postJson<T>(url: string, body: unknown): Promise<T> {
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data?.error?.message ?? `${res.status}`);
-  return data as T;
 }
 
 export default function Home() {
