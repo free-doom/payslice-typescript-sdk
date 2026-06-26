@@ -38,6 +38,40 @@ The banner switches from `MOCK MODE` to `LIVE`. Nothing else changes — the rou
 | `lib/mock.ts` | Canned responses (typed with the SDK's own types) for zero-setup mode |
 | `app/page.tsx` | The UI driving the flow via `fetch` to the routes above |
 
+## Crypto custody payout (`/crypto`)
+
+A second page that tests the **crypto settlement** end-to-end: a signed
+authorization → the Vault/Rail service has its **AWS-KMS delegate** sign an
+Allowance-Module transfer → a **powerless relayer** broadcasts it, moving an
+ERC-20 out of a **2-of-3 Safe** on Base Sepolia. It reuses the SDK's
+`signRequest` primitive (the Vault/Rail uses the same HMAC scheme as the EWA
+API) and, since the rail exposes no GET status endpoint, reads the settlement
+back **off-chain** with `viem` — watching for the `Transfer` to a fresh
+recipient address generated per run.
+
+| File | Shows |
+| --- | --- |
+| `lib/vault-rail.ts` | Signed `POST /v1/payout-authorizations` via the SDK's `signRequest` |
+| `lib/chain.ts` | `viem` scan for the settlement `Transfer` (no status endpoint needed) |
+| `app/api/crypto/payout/route.ts` | Authorize a payout (captures the chain head to bound the scan) |
+| `app/api/crypto/settlement/route.ts` | Read the on-chain settlement back + build the explorer link |
+| `lib/crypto-mock.ts` | Canned reserved→confirmed responses for zero-setup mock mode |
+| `app/crypto/page.tsx` | The UI: amount + recipient → live `reserved → settling → confirmed` + tx link |
+
+Runs in **mock mode** with no setup. To go live against a real Vault/Rail
+deployment, fill the `VAULT_RAIL_*` + `BASE_SEPOLIA_RPC_URL` vars in
+`.env.local` (see `.env.example`). The rail's API is private, so reach it with
+an SSH tunnel and point `VAULT_RAIL_BASE_URL` at the local end:
+
+```sh
+ssh -i <key>.pem -L 8090:127.0.0.1:8090 ubuntu@<box-ip>   # in a separate shell
+# .env.local: VAULT_RAIL_BASE_URL=http://127.0.0.1:8090
+```
+
+> The recipient is a throwaway address with no key — fine for a testnet proof,
+> but it means the settled mock tokens aren't recoverable. Paste your own
+> address in the form if you want to keep them.
+
 ## Webhooks
 
 Point a registered Payslice webhook endpoint at `/api/webhooks/payslice` and set:

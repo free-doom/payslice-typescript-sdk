@@ -1,0 +1,48 @@
+import { NextRequest, NextResponse } from "next/server";
+import { isRailLive, railConfig } from "@/lib/vault-rail";
+import { findSettlement } from "@/lib/chain";
+import { mockSettlement, type SettlementResult } from "@/lib/crypto-mock";
+
+// GET /api/crypto/settlement?recipient=0x..&fromBlock=..&amountMinor=..&attempt=..
+// Reads the settlement back off-chain: scans Base Sepolia for the rail's
+// ERC-20 Transfer to the (fresh) recipient. Returns pending until it's mined.
+export async function GET(req: NextRequest) {
+  const q = req.nextUrl.searchParams;
+  const recipient = q.get("recipient") ?? "";
+  const amountMinor = Number(q.get("amountMinor") ?? "0");
+  const attempt = Number(q.get("attempt") ?? "0");
+
+  if (!isRailLive()) {
+    return NextResponse.json(mockSettlement(amountMinor, attempt));
+  }
+
+  const cfg = railConfig();
+  try {
+    const settlement = await findSettlement({
+      rpcUrl: cfg.rpcUrl,
+      token: cfg.token,
+      recipient,
+      fromBlock: BigInt(q.get("fromBlock") ?? "0"),
+    });
+
+    if (!settlement) {
+      const res: SettlementResult = { status: "pending", mock: false };
+      return NextResponse.json(res);
+    }
+    const res: SettlementResult = {
+      status: "confirmed",
+      txHash: settlement.txHash,
+      blockNumber: settlement.blockNumber,
+      value: settlement.value,
+      confirmations: settlement.confirmations,
+      explorerUrl: `${cfg.explorerBase}/tx/${settlement.txHash}`,
+      mock: false,
+    };
+    return NextResponse.json(res);
+  } catch (err) {
+    return NextResponse.json(
+      { error: { code: "scan_error", message: (err as Error).message } },
+      { status: 502 },
+    );
+  }
+}

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import type {
   Advance,
   CollectionsDue,
@@ -158,7 +159,8 @@ export default function Home() {
       <p className="lede">
         A reference Next.js integration for <code>@payslice/sdk</code>. Every Payslice
         call runs server-side in <code>app/api/*</code> route handlers — the HMAC secret
-        never reaches the browser. Walk the flow: quote → advance → confirm.
+        never reaches the browser. Walk the flow: quote → advance → confirm.{" "}
+        <Link href="/crypto">Crypto custody payout demo →</Link>
       </p>
 
       <div className="grid">
