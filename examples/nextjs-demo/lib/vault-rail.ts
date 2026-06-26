@@ -166,7 +166,10 @@ function maxAmountMinor(): number {
  * Returns a stable `idempotencyKey`: the caller's if provided (so a retry replays
  * instead of double-paying), otherwise a freshly generated one.
  */
-export function validatePayoutInput(raw: unknown): {
+export function validatePayoutInput(
+  raw: unknown,
+  requireIdempotency = false,
+): {
   amountMinor: number;
   recipient: string;
   idempotencyKey: string;
@@ -197,10 +200,39 @@ export function validatePayoutInput(raw: unknown): {
     if (!/^[A-Za-z0-9._-]{8,128}$/.test(idempotencyKey)) {
       throw fail("idempotencyKey must be 8-128 chars of [A-Za-z0-9._-].");
     }
+  } else if (requireIdempotency) {
+    // Live, money-moving path: a caller-supplied key is mandatory so a retry after a
+    // lost response replays instead of firing a second transfer (we can't return a
+    // server-generated key reliably if the connection already dropped).
+    throw fail("idempotencyKey is required for live payouts.");
   } else {
     idempotencyKey = `demo-${Date.now()}-${randomHex(6)}`;
   }
   return { amountMinor, recipient, idempotencyKey };
+}
+
+/** Fail closed on a live-mode rail misconfig that would otherwise move funds the
+ *  settlement scan can never confirm. Throws a 500-tagged error. */
+export function assertRailConfigValid(): void {
+  const cfg = railConfig();
+  const bad = (m: string) => {
+    const err = new Error(m) as Error & { status?: number };
+    err.status = 500;
+    throw err;
+  };
+  if (!/^0x[0-9a-fA-F]{40}$/.test(cfg.safe ?? "")) bad("VAULT_RAIL_SAFE_ADDRESS must be a 0x address.");
+  if (!/^0x[0-9a-fA-F]{40}$/.test(cfg.token)) bad("VAULT_RAIL_USD_TOKEN_CONTRACT must be a 0x address.");
+  if (!Number.isInteger(cfg.decimals) || cfg.decimals < 2) {
+    bad("VAULT_RAIL_TOKEN_DECIMALS must be an integer >= 2 to represent cents.");
+  }
+}
+
+/** Whether the browser can actually trigger a live payout (no bearer-token gate, and
+ *  remote explicitly allowed). The page uses this to avoid creating an EWA advance it
+ *  then can't disburse. Mock mode is always "enabled". */
+export function payoutEnabledFromBrowser(): boolean {
+  if (!isRailLive()) return true;
+  return process.env.VAULT_RAIL_ALLOW_REMOTE === "1" && !process.env.CRYPTO_DEMO_TOKEN;
 }
 
 /**

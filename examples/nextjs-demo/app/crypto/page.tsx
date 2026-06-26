@@ -9,6 +9,7 @@ import type { SettlementResult } from "@/lib/crypto-mock";
 
 interface Mode {
   live: boolean;
+  payoutEnabled: boolean;
   network: string;
   currency: string;
   token: string;
@@ -136,6 +137,15 @@ export default function CryptoFlow() {
   // retry replays the same idempotent payout from the same start block — never a new one.
   async function createAdvance() {
     if (!quote) return;
+    // Don't create a real EWA advance we then can't disburse:
+    if (ewaLive && mode && !mode.live) {
+      setError("EWA is live but the crypto rail is in mock mode — refusing to release a real advance without a real on-chain settlement.");
+      return;
+    }
+    if (mode?.live && !mode.payoutEnabled) {
+      setError("Live payouts are disabled on this deployment (no CRYPTO_DEMO_TOKEN / VAULT_RAIL_ALLOW_REMOTE). Not creating an advance that can't be disbursed.");
+      return;
+    }
     // The rail always settles in its configured currency; reject a mismatched quote.
     if (mode?.live && quote.currency && mode.currency && quote.currency !== mode.currency) {
       setError(`Quote is in ${quote.currency} but the rail settles in ${mode.currency}.`);
@@ -181,6 +191,11 @@ export default function CryptoFlow() {
       const s = await pollSettlement(runId, st.recipient, st.fromBlock, st.advance.amount);
       if (runId !== runIdRef.current) return;
 
+      // Never confirm a REAL EWA advance off a mock (fake-tx) settlement.
+      if (ewaLive && s.mock) {
+        setError("Settlement came back mock but EWA is live — not confirming a real advance.");
+        return;
+      }
       // Auto: confirm the disbursement back to EWA → released.
       const rel = await postJson<Advance>(`/api/advance/${encodeURIComponent(st.advance.id)}/confirm`, {
         status: "executed",
@@ -270,9 +285,15 @@ export default function CryptoFlow() {
               <input value={amount} onChange={(e) => setAmount(e.target.value)} disabled={busy != null} />
               <label>Employee crypto wallet (throwaway — a fresh one is used per disbursement)</label>
               <input value={wallet} readOnly spellCheck={false} style={{ opacity: 0.75 }} />
-              <button onClick={createAdvance} disabled={busy != null}>
+              <button onClick={createAdvance} disabled={busy != null || (mode?.live === true && !mode.payoutEnabled)}>
                 {busy === "advance" ? "Releasing…" : "Create advance & disburse"}
               </button>
+              {mode?.live && !mode.payoutEnabled && (
+                <p className="muted" style={{ fontSize: 12, marginTop: 6 }}>
+                  Live payouts are disabled on this deployment (no <code>CRYPTO_DEMO_TOKEN</code> /{" "}
+                  <code>VAULT_RAIL_ALLOW_REMOTE</code>).
+                </p>
+              )}
 
               {advance && (
                 <>

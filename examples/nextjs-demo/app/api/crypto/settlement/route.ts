@@ -26,7 +26,9 @@ export async function GET(req: NextRequest) {
   // below are swallowed into pending.
   if (!cfg.safe || !ADDR.test(cfg.safe)) return misconfig("VAULT_RAIL_SAFE_ADDRESS is required and must be a 0x address.");
   if (!ADDR.test(cfg.token)) return misconfig("VAULT_RAIL_USD_TOKEN_CONTRACT must be a 0x address.");
-  if (cfg.decimals < 2) return misconfig("VAULT_RAIL_TOKEN_DECIMALS must be >= 2 to represent cents.");
+  if (!Number.isInteger(cfg.decimals) || cfg.decimals < 2) {
+    return misconfig("VAULT_RAIL_TOKEN_DECIMALS must be an integer >= 2 to represent cents.");
+  }
   if (!ADDR.test(recipient)) return badRequest("recipient must be a 0x address.");
   if (!Number.isInteger(amountMinor) || amountMinor <= 0) return badRequest("amountMinor must be a positive integer.");
   let fromBlock: bigint;

@@ -68,9 +68,9 @@ ssh -i <key>.pem -L 8090:127.0.0.1:8090 ubuntu@<box-ip>   # in a separate shell
 # .env.local: VAULT_RAIL_BASE_URL=http://127.0.0.1:8090
 ```
 
-> The recipient is a throwaway address with no key — fine for a testnet proof,
-> but it means the settled mock tokens aren't recoverable. Paste your own
-> address in the form if you want to keep them.
+> A **fresh throwaway recipient is generated for each disbursement** (so the
+> settlement scan is unambiguous), so the settled mock tokens aren't recoverable —
+> fine for a testnet proof.
 
 > **⚠️ Security.** The live `/api/crypto/payout` route signs real (testnet) Vault/Rail
 > payouts with server-side credentials, so it is **disabled by default and fails
