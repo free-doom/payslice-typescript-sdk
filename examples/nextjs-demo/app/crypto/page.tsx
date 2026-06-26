@@ -2,13 +2,13 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import type { Advance, Quote } from "@payslice/sdk";
 import { postJson } from "@/lib/http";
 import { freshAddress, randomHex } from "@/lib/rand";
-import type { PayoutResult, SettlementResult } from "@/lib/crypto-mock";
+import type { SettlementResult } from "@/lib/crypto-mock";
 
 interface Mode {
   live: boolean;
-  baseUrl: string;
   network: string;
   currency: string;
   token: string;
@@ -16,125 +16,176 @@ interface Mode {
   explorerBase: string;
 }
 
-type Phase = "idle" | "authorizing" | "confirming" | "done" | "error";
+type Phase =
+  | "idle"
+  | "quoting"
+  | "advancing"
+  | "settling"
+  | "confirming"
+  | "done"
+  | "error";
 
 const POLL_INTERVAL_MS = 4000;
-const MAX_POLLS = 45; // ~3 minutes
+const MAX_POLLS = 45;
+// Partial drawdown ceiling, kept under the rail's demo cap (VAULT_RAIL_MAX_AMOUNT_MINOR,
+// $1,000). The sandbox can approve much larger quotes; the employee draws this much.
+const DRAW_CAP_MINOR = 50_000; // $500
 
 function fmtUsd(minor: number, currency = "USD"): string {
-  // amount_minor is in cents (2-decimal minor units), system-wide.
   return new Intl.NumberFormat("en-US", { style: "currency", currency }).format(minor / 100);
 }
-
-function short(addr: string): string {
-  return addr.length > 14 ? `${addr.slice(0, 8)}…${addr.slice(-6)}` : addr;
+function short(s: string): string {
+  return s && s.length > 14 ? `${s.slice(0, 8)}…${s.slice(-6)}` : s;
 }
 
-const STEPS = ["Authorizing", "Reserved", "Settling on-chain", "Confirmed"] as const;
+/** Recent month-end settlements the risk engine needs to approve a quote. */
+function recentSettlements(amount: number, currency: string) {
+  const t = new Date();
+  return [1, 2, 3].map((i) => {
+    const d = new Date(t.getFullYear(), t.getMonth() - i + 1, 0);
+    return { amount, currency, date: d.toISOString().slice(0, 10) };
+  });
+}
 
-export default function CryptoPayout() {
+export default function CryptoFlow() {
   const [mode, setMode] = useState<Mode | null>(null);
-  const [amount, setAmount] = useState("500"); // minor units (cents)
-  const [recipient, setRecipient] = useState("");
-  const [payout, setPayout] = useState<PayoutResult | null>(null);
+  const [ewaLive, setEwaLive] = useState(false);
+  const [form, setForm] = useState({
+    user_id: "employee_42",
+    company_id: "employer_7",
+    // ~$750 advance (50% of $1,500) stays under the live rail's $1k demo cap.
+    salary: "150000",
+    currency: "USD",
+    start_date: "2024-01-15",
+    due_date: "2026-07-31",
+  });
+  const [wallet, setWallet] = useState("");
+
+  const [quote, setQuote] = useState<Quote | null>(null);
+  const [advance, setAdvance] = useState<Advance | null>(null);
   const [settlement, setSettlement] = useState<SettlementResult | null>(null);
+  const [released, setReleased] = useState<Advance | null>(null);
   const [phase, setPhase] = useState<Phase>("idle");
   const [error, setError] = useState<string | null>(null);
 
-  // Identifies the current run. Bumping it cancels any in-flight poll chain so a
-  // stale poll (after Reset or a new Send) can't clobber the latest run's state.
   const runIdRef = useRef(0);
-
-  // Stable idempotency key for the payout: reused if a send fails and the user
-  // retries the SAME amount+recipient, so the rail replays instead of paying twice.
-  const idemRef = useRef<{ key: string; amount: number; recipient: string } | null>(null);
 
   useEffect(() => {
     fetch("/api/crypto/mode").then((r) => r.json()).then(setMode).catch(() => {});
-    setRecipient(freshAddress());
-    // Cancel any pending poll if the component unmounts.
-    return () => {
-      runIdRef.current += 1;
-    };
+    fetch("/api/mode").then((r) => r.json()).then((m) => setEwaLive(Boolean(m.live))).catch(() => {});
+    setWallet(freshAddress());
   }, []);
 
-  function reset(newRecipient = true) {
-    runIdRef.current += 1; // cancel any in-flight poll
-    idemRef.current = null; // next send is a new payout intent
-    setPayout(null);
-    setSettlement(null);
-    setError(null);
-    setPhase("idle");
-    if (newRecipient) setRecipient(freshAddress());
+  function set<K extends keyof typeof form>(k: K, v: string) {
+    setForm((f) => ({ ...f, [k]: v }));
   }
 
-  async function send() {
-    const amountMinor = Number(amount);
-    if (!Number.isInteger(amountMinor) || amountMinor <= 0) {
-      setError("Amount must be a positive integer in minor units (cents).");
-      return;
-    }
-    const runId = runIdRef.current + 1;
-    runIdRef.current = runId; // supersedes any prior run/poll
-
-    // Reuse the idempotency key only for a retry of the SAME amount+recipient.
-    if (
-      !idemRef.current ||
-      idemRef.current.amount !== amountMinor ||
-      idemRef.current.recipient !== recipient
-    ) {
-      idemRef.current = { key: `demo-${Date.now()}-${randomHex(6)}`, amount: amountMinor, recipient };
-    }
-    const idempotencyKey = idemRef.current.key;
-
-    setPayout(null);
+  function reset() {
+    runIdRef.current += 1;
+    setQuote(null);
+    setAdvance(null);
     setSettlement(null);
+    setReleased(null);
     setError(null);
-    setPhase("authorizing");
+    setPhase("idle");
+    setWallet(freshAddress());
+  }
 
-    try {
-      const p = await postJson<PayoutResult>("/api/crypto/payout", {
-        amountMinor,
-        recipient,
-        idempotencyKey,
-      });
-      if (runId !== runIdRef.current) return; // superseded while awaiting
-      setPayout(p);
-      setPhase("confirming");
-
+  // Watch the chain for the rail's settlement transfer, then resolve.
+  function pollSettlement(
+    runId: number,
+    recipient: string,
+    fromBlock: number,
+    amountMinor: number,
+  ): Promise<SettlementResult> {
+    return new Promise((resolve, reject) => {
       let attempt = 0;
-      const poll = async () => {
-        if (runId !== runIdRef.current) return; // a newer run/reset took over
+      const tick = async () => {
+        if (runId !== runIdRef.current) return;
         attempt += 1;
         const params = new URLSearchParams({
           recipient,
-          fromBlock: String(p.fromBlock),
+          fromBlock: String(fromBlock),
           amountMinor: String(amountMinor),
           attempt: String(attempt),
         });
         const s = (await fetch(`/api/crypto/settlement?${params}`).then((r) => r.json())) as
           | SettlementResult
           | { error: { message: string } };
-        if (runId !== runIdRef.current) return; // superseded while awaiting
-
-        if ("error" in s) {
-          setError(s.error.message);
-          setPhase("error");
-          return;
-        }
+        if (runId !== runIdRef.current) return;
+        if ("error" in s) return reject(new Error(s.error.message));
         setSettlement(s);
-        if (s.status === "confirmed") {
-          idemRef.current = null; // settled — next send is a new payout
-          setPhase("done");
-          return;
-        }
-        if (attempt < MAX_POLLS) setTimeout(poll, POLL_INTERVAL_MS);
-        else {
-          setError("Timed out waiting for the settlement transfer.");
-          setPhase("error");
-        }
+        if (s.status === "confirmed") return resolve(s);
+        if (attempt < MAX_POLLS) setTimeout(tick, POLL_INTERVAL_MS);
+        else reject(new Error("Timed out waiting for the settlement transfer."));
       };
-      poll();
+      tick();
+    });
+  }
+
+  async function run() {
+    if (!/^0x[0-9a-fA-F]{40}$/.test(wallet)) {
+      setError("Enter a valid 0x employee wallet address.");
+      return;
+    }
+    const runId = runIdRef.current + 1;
+    runIdRef.current = runId;
+    setQuote(null);
+    setAdvance(null);
+    setSettlement(null);
+    setReleased(null);
+    setError(null);
+
+    try {
+      // 1) Quote
+      setPhase("quoting");
+      const settlements = recentSettlements(Number(form.salary) || 0, form.currency);
+      const q = await postJson<Quote>("/api/quote", {
+        user_id: form.user_id,
+        company_id: form.company_id,
+        contract: { id: "contract_1", start_date: form.start_date },
+        salary: { amount: Number(form.salary), currency: form.currency, frequency: "monthly" },
+        settlements,
+      });
+      if (runId !== runIdRef.current) return;
+      setQuote(q);
+
+      // 2) Advance (partner-executed: the partner disburses, then confirms below).
+      //    Partial drawdown kept under the rail's demo cap.
+      setPhase("advancing");
+      const drawMinor = Math.min(q.amount ?? 0, DRAW_CAP_MINOR);
+      const a = await postJson<Advance>("/api/advance", {
+        quote_id: q.id,
+        user_id: q.user_id,
+        amount: drawMinor,
+        currency: q.currency,
+        destination_account_id: "partner_ledger_acct_demo",
+        due_date: form.due_date,
+      });
+      if (runId !== runIdRef.current) return;
+      setAdvance(a);
+
+      // 3) Disburse on-chain via the Vault/Rail (the partner's crypto settlement).
+      //    The advance id is the idempotency key, tying the payout to this advance.
+      setPhase("settling");
+      const payout = await postJson<{ fromBlock: number }>("/api/crypto/payout", {
+        amountMinor: a.amount,
+        recipient: wallet,
+        idempotencyKey: `${a.id}-${randomHex(4)}`,
+      });
+      if (runId !== runIdRef.current) return;
+      const s = await pollSettlement(runId, wallet, payout.fromBlock, a.amount);
+      if (runId !== runIdRef.current) return;
+
+      // 4) Confirm the disbursement back to EWA → advance released.
+      setPhase("confirming");
+      const rel = await postJson<Advance>(`/api/advance/${encodeURIComponent(a.id)}/confirm`, {
+        status: "executed",
+        transfer_ref: s.txHash,
+      });
+      if (runId !== runIdRef.current) return;
+      setReleased(rel);
+      setPhase("done");
     } catch (e) {
       if (runId !== runIdRef.current) return;
       setError((e as Error).message);
@@ -142,22 +193,23 @@ export default function CryptoPayout() {
     }
   }
 
-  const busy = phase === "authorizing" || phase === "confirming";
-  const decimals = payout?.decimals ?? 6;
-  const tokenAmount =
-    settlement?.value != null ? Number(settlement.value) / 10 ** decimals : null;
+  const busy = ["quoting", "advancing", "settling", "confirming"].includes(phase);
+  const decimals = 6; // mock USDC/EURC
+  const tokenAmount = settlement?.value != null ? Number(settlement.value) / 10 ** decimals : null;
 
-  // Index of the active step (0..3); everything before it is done, after it todo.
+  const STEPS = ["Quote", "Advance", "Disburse on-chain", "Confirm → released"] as const;
   const activeIndex =
-    phase === "done" || settlement?.status === "confirmed"
-      ? 3
-      : phase === "authorizing"
+    phase === "done"
+      ? 4
+      : phase === "quoting"
         ? 0
-        : phase === "confirming"
-          ? 2
-          : payout
-            ? 1
-            : -1;
+        : phase === "advancing"
+          ? 1
+          : phase === "settling"
+            ? 2
+            : phase === "confirming"
+              ? 3
+              : -1;
   const stepState = (i: number): "done" | "active" | "todo" =>
     i < activeIndex ? "done" : i === activeIndex ? "active" : "todo";
 
@@ -165,82 +217,73 @@ export default function CryptoPayout() {
     <div className="wrap">
       <header className="top">
         <h1>
-          Payslice <span>Crypto Custody Payout</span>
+          Payslice <span>EWA → Crypto Settlement</span>
         </h1>
         {mode && (
           <span className={`mode ${mode.live ? "live" : "mock"}`}>
-            {mode.live ? "LIVE" : "MOCK MODE"}
+            {mode.live ? "LIVE RAIL" : "MOCK"} · EWA {ewaLive ? "sandbox" : "mock"}
           </span>
         )}
       </header>
       <p className="lede">
-        End-to-end test of the non-custodial crypto rail: a signed authorization →
-        the <strong>KMS delegate</strong> signs an Allowance-Module transfer →
-        the <strong>powerless relayer</strong> broadcasts it, moving tokens out of
-        the <strong>2-of-3 Safe</strong>. Settlement is read back off-chain from{" "}
-        {mode?.network ?? "Base Sepolia"}.{" "}
-        <Link href="/">← back to the EWA demo</Link>
+        The whole flow a crypto partner runs: <strong>quote → advance → disburse → confirm</strong>.
+        The advance is <em>partner-executed</em>; the partner settles it on-chain through the{" "}
+        <strong>Vault/Rail</strong> (KMS-signed Allowance-Module transfer out of the 2-of-3 Safe),
+        then confirms the disbursement back to EWA so the advance is <code>released</code>. No
+        end-user “authorize” step — settlement is automatic.{" "}
+        <Link href="/">← EWA confirm-disbursement demo</Link>
       </p>
 
       <div className="grid">
         <div className="card">
           <h2>
-            <span className="num">1</span> Authorize a payout
+            <span className="num">1</span> Employee & advance request
           </h2>
-
-          <label>Amount (minor units / cents)</label>
-          <input
-            value={amount}
-            onChange={(e) => setAmount(e.target.value)}
-            inputMode="numeric"
-            disabled={busy}
-          />
-          <p className="muted" style={{ margin: "4px 0 0", fontSize: 12 }}>
-            = {fmtUsd(Number(amount) || 0, mode?.currency)} of mock {mode?.currency ?? "USD"}
-          </p>
-
-          <label>Recipient (fresh test address each run)</label>
           <div className="row">
             <div>
-              <input
-                value={recipient}
-                onChange={(e) => setRecipient(e.target.value)}
-                disabled={busy}
-                spellCheck={false}
-              />
+              <label>Employee ID</label>
+              <input value={form.user_id} onChange={(e) => set("user_id", e.target.value)} disabled={busy} />
             </div>
-            <button
-              className="ghost"
-              style={{ marginTop: 0, flex: "0 0 auto" }}
-              onClick={() => setRecipient(freshAddress())}
-              disabled={busy}
-              title="Generate a new throwaway recipient"
-            >
+            <div>
+              <label>Employer ID</label>
+              <input value={form.company_id} onChange={(e) => set("company_id", e.target.value)} disabled={busy} />
+            </div>
+          </div>
+          <div className="row">
+            <div>
+              <label>Monthly salary (cents)</label>
+              <input value={form.salary} onChange={(e) => set("salary", e.target.value)} inputMode="numeric" disabled={busy} />
+            </div>
+            <div>
+              <label>Currency</label>
+              <input value={form.currency} onChange={(e) => set("currency", e.target.value)} disabled={busy} />
+            </div>
+          </div>
+          <label>Employee crypto wallet (where the advance is disbursed)</label>
+          <div className="row">
+            <div>
+              <input value={wallet} onChange={(e) => setWallet(e.target.value)} disabled={busy} spellCheck={false} />
+            </div>
+            <button className="ghost" style={{ marginTop: 0, flex: "0 0 auto" }} onClick={() => setWallet(freshAddress())} disabled={busy} title="Fresh test wallet">
               ↻
             </button>
           </div>
 
-          <button onClick={send} disabled={busy || !recipient}>
-            {phase === "authorizing"
-              ? "Authorizing…"
-              : phase === "confirming"
-                ? "Settling…"
-                : "Send crypto payout"}
+          <button onClick={run} disabled={busy || !wallet}>
+            {busy ? "Running…" : "Run quote → advance → settle → confirm"}
           </button>
-          {(payout || phase === "done" || phase === "error") && (
-            <button className="ghost" onClick={() => reset(true)} disabled={busy} style={{ marginLeft: 8 }}>
+          {(phase === "done" || phase === "error") && (
+            <button className="ghost" onClick={reset} style={{ marginLeft: 8 }}>
               Reset
             </button>
           )}
-
           {error && <div className="err">{error}</div>}
         </div>
 
         <div className="card">
           <h2>
-            <span className="num">2</span> Settlement
+            <span className="num">2</span> Flow
           </h2>
-
           <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 8 }}>
             {STEPS.map((label, i) => {
               const st = stepState(i);
@@ -249,42 +292,30 @@ export default function CryptoPayout() {
                   <span className="k">
                     {st === "done" ? "✓" : st === "active" ? "●" : "○"} {label}
                   </span>
-                  <span className="v" style={{ opacity: st === "todo" ? 0.4 : 1 }}>
-                    {i === 1 && payout ? payout.status : ""}
-                  </span>
                 </div>
               );
             })}
           </div>
 
-          {payout && (
-            <>
-              <div className="kv">
-                <span className="k">payout_ref</span>
-                <span className="v">{short(payout.payout_ref)}</span>
-              </div>
-              <div className="kv">
-                <span className="k">recipient</span>
-                <span className="v">{short(payout.recipient)}</span>
-              </div>
-            </>
+          {quote && (
+            <div className="kv">
+              <span className="k">quote</span>
+              <span className="v">{fmtUsd(quote.amount ?? 0, quote.currency ?? "USD")} approved</span>
+            </div>
           )}
-
+          {advance && (
+            <div className="kv">
+              <span className="k">advance</span>
+              <span className="v">{short(advance.id)}</span>
+            </div>
+          )}
           {settlement?.status === "confirmed" && (
             <>
               <div className="kv">
-                <span className="k">status</span>
-                <span className="badge released">confirmed{settlement.mock ? " (mock)" : ""}</span>
-              </div>
-              <div className="kv">
-                <span className="k">amount moved</span>
+                <span className="k">disbursed on-chain</span>
                 <span className="v">
-                  {tokenAmount != null ? tokenAmount.toLocaleString() : "—"} {mode?.currency ?? "USD"}
+                  {tokenAmount != null ? tokenAmount.toLocaleString() : "—"} {mode?.currency}
                 </span>
-              </div>
-              <div className="kv">
-                <span className="k">confirmations</span>
-                <span className="v">{settlement.confirmations ?? "—"}</span>
               </div>
               <div className="kv">
                 <span className="k">tx</span>
@@ -300,15 +331,21 @@ export default function CryptoPayout() {
               </div>
             </>
           )}
-
-          {phase === "confirming" && settlement?.status !== "confirmed" && (
-            <p className="muted" style={{ fontSize: 13 }}>
-              Waiting for the relayer to broadcast and the transfer to mine…
-            </p>
+          {released && (
+            <div className="kv">
+              <span className="k">advance status</span>
+              <span className={`badge ${released.status === "released" ? "released" : "failed"}`}>
+                {released.status}
+              </span>
+            </div>
           )}
-          {phase === "idle" && !payout && (
+
+          {phase === "settling" && settlement?.status !== "confirmed" && (
+            <p className="muted" style={{ fontSize: 13 }}>Relayer broadcasting; waiting for the transfer to mine…</p>
+          )}
+          {phase === "idle" && (
             <p className="muted" style={{ fontSize: 13 }}>
-              Authorize a payout to watch it settle on {mode?.network ?? "Base Sepolia"}.
+              Run the flow to quote an advance and settle it on {mode?.network ?? "Base Sepolia"}.
             </p>
           )}
         </div>
@@ -316,19 +353,10 @@ export default function CryptoPayout() {
 
       <footer>
         {mode?.safe && (
-          <>
-            Safe (treasury): <code>{mode.safe}</code> · token: <code>{short(mode.token)}</code> ·{" "}
-          </>
+          <>Safe (treasury): <code>{mode.safe}</code> · token: <code>{short(mode.token)}</code> · </>
         )}
-        {mode?.live ? (
-          <>Live against the Vault/Rail service at <code>{mode.baseUrl}</code>.</>
-        ) : (
-          <>
-            Mock mode — set <code>VAULT_RAIL_BASE_URL</code>, <code>VAULT_RAIL_KEY_ID</code>,{" "}
-            <code>VAULT_RAIL_SECRET</code> and <code>VAULT_RAIL_USD_TOKEN_CONTRACT</code> in{" "}
-            <code>.env.local</code> to go live (see the demo README).
-          </>
-        )}
+        EWA quote/advance/confirm use the {ewaLive ? "live Payslice sandbox" : "built-in mock"}; the
+        on-chain disbursement uses the {mode?.live ? "live Vault/Rail" : "mock"} rail.
       </footer>
     </div>
   );
