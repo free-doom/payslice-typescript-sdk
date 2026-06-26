@@ -207,14 +207,26 @@ export function validatePayoutInput(raw: unknown): {
  * set would otherwise be an unauthenticated endpoint that signs real payouts.
  * Set VAULT_RAIL_ALLOW_REMOTE=1 ONLY if you've put your own auth in front of it.
  */
-export function assertLiveAllowed(host: string | null): void {
+export function assertLiveAllowed(authHeader: string | null): void {
+  const deny = (message: string) => {
+    const err = new Error(message) as Error & { status?: number };
+    err.status = 403;
+    throw err;
+  };
+  // Real gate (recommended for any shared/public deploy): if a demo token is set,
+  // require it as a bearer. NOTE: a browser page can't hold a server secret, so
+  // setting this restricts the route to programmatic callers that have the token.
+  const token = process.env.CRYPTO_DEMO_TOKEN;
+  if (token) {
+    if (authHeader === `Bearer ${token}`) return;
+    deny("Live crypto payouts require a valid CRYPTO_DEMO_TOKEN bearer token.");
+  }
+  // No token: this route is unauthenticated, so it is DISABLED unless the operator
+  // explicitly opts into remote/public exposure. `Host` is intentionally NOT trusted
+  // (it is client-supplied and spoofable) — we fail closed instead.
   if (process.env.VAULT_RAIL_ALLOW_REMOTE === "1") return;
-  const h = (host ?? "").split(":")[0].toLowerCase();
-  if (h === "localhost" || h === "127.0.0.1" || h === "::1" || h === "[::1]") return;
-  const err = new Error(
-    "Live crypto payouts are restricted to localhost (reach the rail via an SSH tunnel). " +
-      "Set VAULT_RAIL_ALLOW_REMOTE=1 only behind your own authentication.",
-  ) as Error & { status?: number };
-  err.status = 403;
-  throw err;
+  deny(
+    "Live crypto payouts are disabled. Set CRYPTO_DEMO_TOKEN (recommended) for a real gate, " +
+      "or VAULT_RAIL_ALLOW_REMOTE=1 to run an intentionally-public, cap-bounded demo (incl. local dev).",
+  );
 }

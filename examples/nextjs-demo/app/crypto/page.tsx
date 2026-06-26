@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import type { Advance, Quote } from "@payslice/sdk";
 import { postJson } from "@/lib/http";
-import { freshAddress, randomHex } from "@/lib/rand";
+import { freshAddress } from "@/lib/rand";
 import type { SettlementResult } from "@/lib/crypto-mock";
 
 interface Mode {
@@ -12,6 +12,7 @@ interface Mode {
   network: string;
   currency: string;
   token: string;
+  decimals: number;
   safe: string | null;
   explorerBase: string;
 }
@@ -102,19 +103,23 @@ export default function CryptoFlow() {
       const tick = async () => {
         if (runId !== runIdRef.current) return;
         attempt += 1;
-        const params = new URLSearchParams({
-          recipient,
-          fromBlock: String(fromBlock),
-          amountMinor: String(amountMinor),
-          attempt: String(attempt),
-        });
-        const s = (await fetch(`/api/crypto/settlement?${params}`).then((r) => r.json())) as
-          | SettlementResult
-          | { error: { message: string } };
-        if (runId !== runIdRef.current) return;
-        if ("error" in s) return reject(new Error(s.error.message));
-        setSettlement(s);
-        if (s.status === "confirmed") return resolve(s);
+        try {
+          const params = new URLSearchParams({
+            recipient,
+            fromBlock: String(fromBlock),
+            amountMinor: String(amountMinor),
+            attempt: String(attempt),
+          });
+          const res = await fetch(`/api/crypto/settlement?${params}`);
+          const s = (await res.json()) as SettlementResult | { error: { message: string } };
+          if (runId !== runIdRef.current) return;
+          if ("error" in s) return reject(new Error(s.error.message));
+          setSettlement(s);
+          if (s.status === "confirmed") return resolve(s);
+        } catch {
+          // Network / non-JSON blip: treat as transient and keep polling (bounded).
+          if (runId !== runIdRef.current) return;
+        }
         if (attempt < MAX_POLLS) setTimeout(tick, POLL_INTERVAL_MS);
         else reject(new Error("Timed out waiting for the settlement transfer."));
       };
@@ -153,7 +158,9 @@ export default function CryptoFlow() {
       const payout = await postJson<{ fromBlock: number }>("/api/crypto/payout", {
         amountMinor: a.amount,
         recipient: wallet,
-        idempotencyKey: `${a.id}-${randomHex(4)}`,
+        // Stable key: the advance id is unique per advance, so a retry replays the same
+        // authorization on the rail instead of firing a second transfer.
+        idempotencyKey: a.id,
       });
       if (runId !== runIdRef.current) return;
       const s = await pollSettlement(runId, wallet, payout.fromBlock, a.amount);
@@ -175,7 +182,8 @@ export default function CryptoFlow() {
   }
 
   const settling = busy === "advance" && advance != null && released == null;
-  const tokenAmount = settlement?.value != null ? Number(settlement.value) / 1e6 : null;
+  const tokenAmount =
+    settlement?.value != null ? Number(settlement.value) / 10 ** (mode?.decimals ?? 6) : null;
 
   return (
     <div className="wrap">

@@ -17,6 +17,14 @@ export async function GET(req: NextRequest) {
   }
 
   const cfg = railConfig();
+  // Fail closed: without the treasury Safe we can't constrain the transfer's sender,
+  // so a same-amount transfer to a reused recipient could be mistaken for settlement.
+  if (!cfg.safe) {
+    return NextResponse.json(
+      { error: { code: "misconfig", message: "VAULT_RAIL_SAFE_ADDRESS is required for live settlement matching." } },
+      { status: 500 },
+    );
+  }
   try {
     // Expected on-chain amount: cents -> token base units (e.g. 500 -> 5_000_000 at 6dp).
     const expectedValue =

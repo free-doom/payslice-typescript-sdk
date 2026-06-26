@@ -24,8 +24,9 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(mockPayout(recipient));
     }
 
-    // Live, money-moving path: default-deny non-localhost callers.
-    assertLiveAllowed(req.headers.get("host"));
+    // Live, money-moving path: fail closed unless explicitly enabled (CRYPTO_DEMO_TOKEN
+    // bearer, or VAULT_RAIL_ALLOW_REMOTE=1 for an intentionally-public cap-bounded demo).
+    assertLiveAllowed(req.headers.get("authorization"));
 
     const cfg = railConfig();
     const fromBlock = await currentBlock(cfg.rpcUrl);

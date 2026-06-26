@@ -11,6 +11,7 @@ export async function GET() {
     network: cfg.network,
     currency: cfg.currency,
     token: cfg.token,
+    decimals: cfg.decimals,
     safe: cfg.safe ?? null,
     explorerBase: cfg.explorerBase,
   });
