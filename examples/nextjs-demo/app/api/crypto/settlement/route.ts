@@ -17,25 +17,33 @@ export async function GET(req: NextRequest) {
   }
 
   const cfg = railConfig();
-  // Fail closed: without the treasury Safe we can't constrain the transfer's sender,
-  // so a same-amount transfer to a reused recipient could be mistaken for settlement.
-  if (!cfg.safe) {
-    return NextResponse.json(
-      { error: { code: "misconfig", message: "VAULT_RAIL_SAFE_ADDRESS is required for live settlement matching." } },
-      { status: 500 },
-    );
+  const ADDR = /^0x[0-9a-fA-F]{40}$/;
+  const misconfig = (m: string) => NextResponse.json({ error: { code: "misconfig", message: m } }, { status: 500 });
+  const badRequest = (m: string) => NextResponse.json({ error: { code: "bad_request", message: m } }, { status: 400 });
+
+  // Validate deterministic preconditions UP FRONT so a permanent misconfig surfaces an
+  // error instead of polling "pending" forever. Only genuinely transient RPC failures
+  // below are swallowed into pending.
+  if (!cfg.safe || !ADDR.test(cfg.safe)) return misconfig("VAULT_RAIL_SAFE_ADDRESS is required and must be a 0x address.");
+  if (!ADDR.test(cfg.token)) return misconfig("VAULT_RAIL_USD_TOKEN_CONTRACT must be a 0x address.");
+  if (cfg.decimals < 2) return misconfig("VAULT_RAIL_TOKEN_DECIMALS must be >= 2 to represent cents.");
+  if (!ADDR.test(recipient)) return badRequest("recipient must be a 0x address.");
+  if (!Number.isInteger(amountMinor) || amountMinor <= 0) return badRequest("amountMinor must be a positive integer.");
+  let fromBlock: bigint;
+  try {
+    fromBlock = BigInt(q.get("fromBlock") ?? "0");
+  } catch {
+    return badRequest("fromBlock must be an integer.");
   }
+
   try {
     // Expected on-chain amount: cents -> token base units (e.g. 500 -> 5_000_000 at 6dp).
-    const expectedValue =
-      amountMinor > 0 && cfg.decimals >= 2
-        ? BigInt(amountMinor) * 10n ** BigInt(cfg.decimals - 2)
-        : undefined;
+    const expectedValue = BigInt(amountMinor) * 10n ** BigInt(cfg.decimals - 2);
     const settlement = await findSettlement({
       rpcUrl: cfg.rpcUrl,
       token: cfg.token,
       recipient,
-      fromBlock: BigInt(q.get("fromBlock") ?? "0"),
+      fromBlock,
       safe: cfg.safe,
       expectedValue,
     });

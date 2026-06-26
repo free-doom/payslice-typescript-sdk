@@ -59,6 +59,9 @@ export default function CryptoFlow() {
   const [error, setError] = useState<string | null>(null);
 
   const runIdRef = useRef(0);
+  // The in-flight disbursement, persisted across retries so re-clicking RESUMES the same
+  // advance/recipient/start-block (idempotent) instead of creating a new advance + payout.
+  const flowRef = useRef<{ advance: Advance; recipient: string; fromBlock: number | null } | null>(null);
   const settlements = recentSettlements(Number(form.salary) || 0, form.currency);
 
   useEffect(() => {
@@ -73,6 +76,7 @@ export default function CryptoFlow() {
 
   async function createQuote() {
     runIdRef.current += 1;
+    flowRef.current = null; // a new quote starts a fresh disbursement flow
     setBusy("quote");
     setError(null);
     setQuote(null);
@@ -128,51 +132,63 @@ export default function CryptoFlow() {
   }
 
   // Create the advance, then AUTO-settle on-chain and confirm back to EWA.
+  // Re-clicking after a failure RESUMES the same advance (stored in flowRef) so the
+  // retry replays the same idempotent payout from the same start block — never a new one.
   async function createAdvance() {
     if (!quote) return;
-    if (!/^0x[0-9a-fA-F]{40}$/.test(wallet)) {
-      setError("Enter a valid 0x employee wallet address.");
+    // The rail always settles in its configured currency; reject a mismatched quote.
+    if (mode?.live && quote.currency && mode.currency && quote.currency !== mode.currency) {
+      setError(`Quote is in ${quote.currency} but the rail settles in ${mode.currency}.`);
       return;
     }
     const runId = runIdRef.current + 1;
     runIdRef.current = runId;
     setBusy("advance");
     setError(null);
-    setAdvance(null);
     setSettlement(null);
     setReleased(null);
     try {
-      const amountMinor = Math.min(Number(amount) || 0, DRAW_CAP_MINOR);
-      const a = await postJson<Advance>("/api/advance", {
-        quote_id: quote.id,
-        user_id: quote.user_id,
-        amount: amountMinor,
-        currency: quote.currency,
-        destination_account_id: "partner_ledger_acct_demo",
-        due_date: form.due_date,
-      });
-      if (runId !== runIdRef.current) return;
-      setAdvance(a);
+      // Fresh advance + fresh recipient for a NEW run; reuse the stored ones on a retry.
+      let st = flowRef.current;
+      if (!st) {
+        const recipient = freshAddress();
+        setWallet(recipient);
+        const amountMinor = Math.min(Number(amount) || 0, DRAW_CAP_MINOR);
+        const a = await postJson<Advance>("/api/advance", {
+          quote_id: quote.id,
+          user_id: quote.user_id,
+          amount: amountMinor,
+          currency: quote.currency,
+          destination_account_id: "partner_ledger_acct_demo",
+          due_date: form.due_date,
+        });
+        if (runId !== runIdRef.current) return;
+        st = { advance: a, recipient, fromBlock: null };
+        flowRef.current = st;
+      }
+      setAdvance(st.advance);
 
       // Auto: disburse on-chain via the Vault/Rail (the partner's crypto settlement).
+      // Stable idempotency key = advance id. Pin the scan's start block on the FIRST
+      // payout so an idempotent replay (whose Transfer already mined) is still found.
       const payout = await postJson<{ fromBlock: number }>("/api/crypto/payout", {
-        amountMinor: a.amount,
-        recipient: wallet,
-        // Stable key: the advance id is unique per advance, so a retry replays the same
-        // authorization on the rail instead of firing a second transfer.
-        idempotencyKey: a.id,
+        amountMinor: st.advance.amount,
+        recipient: st.recipient,
+        idempotencyKey: st.advance.id,
       });
       if (runId !== runIdRef.current) return;
-      const s = await pollSettlement(runId, wallet, payout.fromBlock, a.amount);
+      if (st.fromBlock == null) st.fromBlock = payout.fromBlock;
+      const s = await pollSettlement(runId, st.recipient, st.fromBlock, st.advance.amount);
       if (runId !== runIdRef.current) return;
 
       // Auto: confirm the disbursement back to EWA → released.
-      const rel = await postJson<Advance>(`/api/advance/${encodeURIComponent(a.id)}/confirm`, {
+      const rel = await postJson<Advance>(`/api/advance/${encodeURIComponent(st.advance.id)}/confirm`, {
         status: "executed",
         transfer_ref: s.txHash,
       });
       if (runId !== runIdRef.current) return;
       setReleased(rel);
+      flowRef.current = null; // settled — next run is a fresh flow
     } catch (e) {
       if (runId !== runIdRef.current) return;
       setError((e as Error).message);
@@ -252,16 +268,9 @@ export default function CryptoFlow() {
               <h2><span className="num">2</span> Draw down an advance (crypto)</h2>
               <label>Amount (cents, ≤ quoted; capped at {fmt(DRAW_CAP_MINOR)} for the demo)</label>
               <input value={amount} onChange={(e) => setAmount(e.target.value)} disabled={busy != null} />
-              <label>Employee crypto wallet</label>
-              <div className="row">
-                <div>
-                  <input value={wallet} onChange={(e) => setWallet(e.target.value)} disabled={busy != null} spellCheck={false} />
-                </div>
-                <button className="ghost" style={{ marginTop: 0, flex: "0 0 auto" }} onClick={() => setWallet(freshAddress())} disabled={busy != null} title="Fresh test wallet">
-                  ↻
-                </button>
-              </div>
-              <button onClick={createAdvance} disabled={busy != null || !wallet}>
+              <label>Employee crypto wallet (throwaway — a fresh one is used per disbursement)</label>
+              <input value={wallet} readOnly spellCheck={false} style={{ opacity: 0.75 }} />
+              <button onClick={createAdvance} disabled={busy != null}>
                 {busy === "advance" ? "Releasing…" : "Create advance & disburse"}
               </button>
 

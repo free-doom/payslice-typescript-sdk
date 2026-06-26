@@ -36,13 +36,16 @@ export interface RailConfig {
   safe?: string; // the treasury Safe (display only)
 }
 
-/** Live when the rail URL + HMAC creds + settlement token are all configured. */
+/** Live when the rail URL + HMAC creds + settlement token + treasury Safe are all set.
+ *  The Safe is required: settlement matching constrains the transfer sender to it, so
+ *  without it the live path would authorize a transfer it can never safely confirm. */
 export function isRailLive(): boolean {
   return Boolean(
     process.env.VAULT_RAIL_BASE_URL &&
       process.env.VAULT_RAIL_KEY_ID &&
       process.env.VAULT_RAIL_SECRET &&
-      process.env.VAULT_RAIL_USD_TOKEN_CONTRACT,
+      process.env.VAULT_RAIL_USD_TOKEN_CONTRACT &&
+      process.env.VAULT_RAIL_SAFE_ADDRESS,
   );
 }
 
