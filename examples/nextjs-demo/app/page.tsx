@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import type {
   Advance,
   CollectionsDue,
@@ -8,6 +9,7 @@ import type {
   Quote,
   VaultResponse,
 } from "@payslice/sdk";
+import { postJson } from "@/lib/http";
 
 function fmt(amount: number | null | undefined, currency = "USD"): string {
   if (amount == null) return "—";
@@ -24,17 +26,6 @@ function recentSettlements(amount: number, currency: string) {
     const d = new Date(today.getFullYear(), today.getMonth() - i + 1, 0);
     return { amount, currency, date: d.toISOString().slice(0, 10) };
   });
-}
-
-async function postJson<T>(url: string, body: unknown): Promise<T> {
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data?.error?.message ?? `${res.status}`);
-  return data as T;
 }
 
 export default function Home() {
@@ -158,7 +149,8 @@ export default function Home() {
       <p className="lede">
         A reference Next.js integration for <code>@payslice/sdk</code>. Every Payslice
         call runs server-side in <code>app/api/*</code> route handlers — the HMAC secret
-        never reaches the browser. Walk the flow: quote → advance → confirm.
+        never reaches the browser. Walk the flow: quote → advance → confirm.{" "}
+        <Link href="/crypto">EWA → crypto settlement (full flow) →</Link>
       </p>
 
       <div className="grid">
